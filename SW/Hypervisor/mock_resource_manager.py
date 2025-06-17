@@ -56,22 +56,48 @@ class MockMMIO:
         logger.info(f"[MOCK] Created MMIO at 0x{base_address:08x}, length: {length}")
     
     def read(self, offset, length=4):
-        """Simula lettura MMIO"""
-        if offset >= self.length:
-            raise Exception(f"Offset {offset} out of range")
+        """Simula lettura MMIO con validazione migliorata"""
+        # Validazione già fatta nel ResourceManager, ma doppio controllo non fa male
+        if offset < 0 or offset >= self.length:
+            raise Exception(f"MMIO read offset {offset} out of range [0, {self.length})")
         
-        # Ritorna valore simulato
-        value = self._memory.get(offset, random.randint(0, 0xFFFFFFFF))
-        logger.debug(f"[MOCK] MMIO read: offset=0x{offset:04x}, value=0x{value:08x}")
+        if length not in [1, 2, 4, 8]:
+            logger.warning(f"Non-standard read length {length}, defaulting to 4")
+            length = 4
+        
+        if offset + length > self.length:
+            raise Exception(f"MMIO read would exceed bounds")
+        
+        # Leggi valore byte per byte (più realistico)
+        value = 0
+        for i in range(length):
+            byte_offset = offset + i
+            byte_val = self._memory.get(byte_offset, 0)  # Default a 0 se non inizializzato
+            value |= (byte_val << (i * 8))
+        
+        logger.debug(f"[MOCK] MMIO read: offset=0x{offset:04x}, length={length}, value=0x{value:08x}")
         return value
     
-    def write(self, offset, value):
-        """Simula scrittura MMIO"""
-        if offset >= self.length:
-            raise Exception(f"Offset {offset} out of range")
+    def write(self, offset, value, length=4):
+        """Simula scrittura MMIO con validazione migliorata"""
+        # Validazione già fatta nel ResourceManager, ma doppio controllo non fa male
+        if offset < 0 or offset >= self.length:
+            raise Exception(f"MMIO write offset {offset} out of range [0, {self.length})")
         
-        self._memory[offset] = value
-        logger.debug(f"[MOCK] MMIO write: offset=0x{offset:04x}, value=0x{value:08x}")
+        if length not in [1, 2, 4, 8]:
+            logger.warning(f"Non-standard write length {length}, defaulting to 4")
+            length = 4
+            
+        if offset + length > self.length:
+            raise Exception(f"MMIO write would exceed bounds")
+        
+        # Scrivi valore byte per byte (più realistico)
+        for i in range(length):
+            byte_offset = offset + i
+            byte_val = (value >> (i * 8)) & 0xFF
+            self._memory[byte_offset] = byte_val
+        
+        logger.debug(f"[MOCK] MMIO write: offset=0x{offset:04x}, value=0x{value:08x}, length={length}")
 
 class MockBuffer:
     def __init__(self, size):
@@ -209,7 +235,7 @@ class MockResourceManager:
             return handle
     
     def mmio_read(self, tenant_id: str, handle: str, offset: int, length: int) -> int:
-        """Simula lettura MMIO"""
+        """Simula lettura MMIO con controlli di sicurezza completi"""
         with self._lock:
             # Verifica ownership
             if handle not in self._resources:
@@ -219,16 +245,32 @@ class MockResourceManager:
             if resource.tenant_id != tenant_id:
                 raise Exception("MMIO not owned by tenant")
             
-            # Verifica che offset sia nel range
-            mmio = self._mmios[handle]
-            if offset + length > resource.metadata['length']:
-                raise Exception("Offset out of range")
+            # Ottieni info dal metadata
+            base_address = resource.metadata['base_address']
+            mmio_length = resource.metadata['length']
+            
+            # Verifica che offset non sia negativo
+            if offset < 0:
+                raise Exception(f"Negative offset not allowed: {offset}")
+            
+            # Verifica che la lettura non vada oltre i limiti del MMIO
+            if offset + length > mmio_length:
+                raise Exception(f"Read out of bounds: offset {offset} + length {length} > MMIO size {mmio_length}")
+            
+            # Verifica che il tenant possa ancora accedere all'indirizzo effettivo
+            actual_address = base_address + offset
+            if not self.tenant_manager.is_address_allowed(tenant_id, actual_address, length):
+                raise Exception(f"Tenant {tenant_id} no longer allowed to access address 0x{actual_address:08x}")
             
             # Leggi valore simulato
-            return mmio.read(offset, length)
+            mmio = self._mmios[handle]
+            value = mmio.read(offset, length)
+            
+            logger.debug(f"MMIO read by {tenant_id}: handle={handle}, addr=0x{actual_address:08x}, value=0x{value:08x}")
+            return value
     
     def mmio_write(self, tenant_id: str, handle: str, offset: int, value: int):
-        """Simula scrittura MMIO"""
+        """Simula scrittura MMIO con controlli di sicurezza completi"""
         with self._lock:
             # Verifica ownership
             if handle not in self._resources:
@@ -238,13 +280,37 @@ class MockResourceManager:
             if resource.tenant_id != tenant_id:
                 raise Exception("MMIO not owned by tenant")
             
-            # Verifica che offset sia nel range
-            mmio = self._mmios[handle]
-            if offset >= resource.metadata['length']:
-                raise Exception("Offset out of range")
+            # Ottieni info dal metadata
+            base_address = resource.metadata['base_address']
+            mmio_length = resource.metadata['length']
+            
+            # Verifica che offset non sia negativo
+            if offset < 0:
+                raise Exception(f"Negative offset not allowed: {offset}")
+            
+            # Verifica che offset sia nel range (per scrittura singola)
+            if offset >= mmio_length:
+                raise Exception(f"Write offset out of bounds: offset {offset} >= MMIO size {mmio_length}")
+            
+            # Assumiamo scritture a 32-bit (4 bytes) per default
+            write_length = 4
+            if offset + write_length > mmio_length:
+                raise Exception(f"Write would exceed MMIO bounds: offset {offset} + {write_length} > MMIO size {mmio_length}")
+            
+            # Verifica che il tenant possa ancora accedere all'indirizzo effettivo
+            actual_address = base_address + offset
+            if not self.tenant_manager.is_address_allowed(tenant_id, actual_address, write_length):
+                raise Exception(f"Tenant {tenant_id} no longer allowed to access address 0x{actual_address:08x}")
+            
+            # Verifica che il valore sia nel range di 32-bit
+            if value < 0 or value > 0xFFFFFFFF:
+                raise Exception(f"Value out of 32-bit range: {value}")
             
             # Scrivi valore
+            mmio = self._mmios[handle]
             mmio.write(offset, value)
+            
+            logger.debug(f"MMIO write by {tenant_id}: handle={handle}, addr=0x{actual_address:08x}, value=0x{value:08x}")
     
     def allocate_buffer(self, tenant_id: str, size: int, buffer_type: int) -> Tuple[str, int]:
         """Simula allocazione buffer"""

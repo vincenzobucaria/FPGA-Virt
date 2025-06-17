@@ -60,19 +60,13 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
         """Carica overlay"""
         tenant_id = self._get_tenant_id(context)
         logger.info(f"LoadOverlay request from {tenant_id}: {request.bitfile_path}")
-        logger.info(f"LoadOverlay request from {tenant_id}: {request.bitfile_path}")
         
-        # Debug dettagliato
-        logger.info(f"[DEBUG] tenant_id type: {type(tenant_id)}, value: {tenant_id}")
-        logger.info(f"[DEBUG] bitfile_path type: {type(request.bitfile_path)}, value: {request.bitfile_path}")
-        logger.info(f"[DEBUG] resource_manager: {self.resource_manager}")
         try:
             overlay_id, ip_cores = self.resource_manager.load_overlay(
                 tenant_id, 
                 request.bitfile_path
             )
-            logger.info(f"[DEBUG] overlay_id: {overlay_id}")
-            logger.info(f"[DEBUG] ip_cores: {ip_cores}")
+            logger.info(f"Overlay loaded successfully: {overlay_id}")
             
             # Converti IP cores in formato proto
             proto_ip_cores = {}
@@ -92,15 +86,15 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
             
         except Exception as e:
             logger.error(f"LoadOverlay error: {e}")
-            context.abort(grpc.StatusCode.INTERNAL, str(e))
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             context.abort(grpc.StatusCode.INTERNAL, str(e))
+    
     def GetOverlayInfo(self, request, context):
         """Ottieni info overlay"""
         tenant_id = self._get_tenant_id(context)
         
-        # TODO: Implementare
+        # TODO: Implementare recupero info overlay
         return pb2.OverlayInfoResponse(
             overlay_id=request.overlay_id,
             loaded_at=int(time.time())
@@ -112,15 +106,34 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
         tenant_id = self._get_tenant_id(context)
         logger.info(f"CreateMMIO request from {tenant_id}")
         
+        overlay_id = request.overlay_id
+        
+        # Se l'overlay_id è "current", trova l'ultimo overlay caricato dal tenant
+        if overlay_id == "current":
+            # Trova l'ultimo overlay del tenant
+            tenant_overlays = [
+                (handle, res) for handle, res in self.resource_manager._resources.items()
+                if res.tenant_id == tenant_id and res.resource_type == "overlay"
+            ]
+            
+            if tenant_overlays:
+                # Prendi il più recente basandosi su created_at
+                overlay_id = max(tenant_overlays, key=lambda x: x[1].created_at)[0]
+                logger.info(f"Found current overlay: {overlay_id}")
+            else:
+                context.abort(grpc.StatusCode.FAILED_PRECONDITION, "No overlay loaded")
+        
         try:
+            # Ora overlay_id contiene l'handle corretto
             handle = self.resource_manager.create_mmio(
                 tenant_id,
-                request.overlay_id,
+                overlay_id,  # Usa l'overlay_id risolto
                 request.ip_name,
                 request.base_address,
                 request.length
             )
             
+            logger.info(f"MMIO created successfully: {handle}")
             return pb2.CreateMMIOResponse(handle=handle)
             
         except Exception as e:
@@ -188,25 +201,69 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
     
     # Altri metodi da implementare...
     def ReadBuffer(self, request, context):
-        # TODO
+        """Leggi da buffer - TODO"""
+        tenant_id = self._get_tenant_id(context)
+        # TODO: Implementare lettura buffer
         return pb2.ReadBufferResponse(data=b'')
     
     def WriteBuffer(self, request, context):
-        # TODO
+        """Scrivi su buffer - TODO"""
+        tenant_id = self._get_tenant_id(context)
+        # TODO: Implementare scrittura buffer
         return pb2.Empty()
     
     def FreeBuffer(self, request, context):
-        # TODO
+        """Libera buffer - TODO"""
+        tenant_id = self._get_tenant_id(context)
+        # TODO: Implementare deallocazione buffer
         return pb2.Empty()
     
     def CreateDMA(self, request, context):
-        # TODO
-        return pb2.CreateDMAResponse(handle="dma_todo")
+        """Crea DMA handle"""
+        tenant_id = self._get_tenant_id(context)
+        logger.info(f"CreateDMA request from {tenant_id}")
+        
+        overlay_id = request.overlay_id
+        
+        # Gestisci "current" come in CreateMMIO
+        if overlay_id == "current":
+            tenant_overlays = [
+                (handle, res) for handle, res in self.resource_manager._resources.items()
+                if res.tenant_id == tenant_id and res.resource_type == "overlay"
+            ]
+            
+            if tenant_overlays:
+                overlay_id = max(tenant_overlays, key=lambda x: x[1].created_at)[0]
+                logger.info(f"Found current overlay for DMA: {overlay_id}")
+            else:
+                context.abort(grpc.StatusCode.FAILED_PRECONDITION, "No overlay loaded")
+        
+        try:
+            handle, info = self.resource_manager.create_dma(
+                tenant_id,
+                overlay_id,
+                request.dma_name
+            )
+            
+            return pb2.CreateDMAResponse(
+                handle=handle,
+                has_send_channel=info['has_send_channel'],
+                has_recv_channel=info['has_recv_channel'],
+                max_transfer_size=info['max_transfer_size']
+            )
+            
+        except Exception as e:
+            logger.error(f"CreateDMA error: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
     
     def DMATransfer(self, request, context):
-        # TODO
+        """Esegui trasferimento DMA - TODO"""
+        tenant_id = self._get_tenant_id(context)
+        # TODO: Implementare trasferimento DMA
         return pb2.DMATransferResponse(transfer_id="transfer_todo")
     
     def GetDMAStatus(self, request, context):
-        # TODO
+        """Ottieni stato DMA - TODO"""
+        tenant_id = self._get_tenant_id(context)
+        # TODO: Implementare stato DMA
         return pb2.GetDMAStatusResponse(status=0)
