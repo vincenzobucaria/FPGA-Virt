@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, asdict
 import logging
 from config import TenantConfig
+
 logger = logging.getLogger(__name__)
 
 class DynamicConfigManager:
@@ -18,11 +19,63 @@ class DynamicConfigManager:
         if config_file and os.path.exists(config_file):
             self._load_from_file()
         else:
-            self.tenants = {}
+            print(f"[WARNING] Config file not found: {config_file}, using defaults")
+            self._load_default_config()
             
         # Settings globali
         self.socket_dir = os.environ.get('PYNQ_SOCKET_DIR', '/var/run/pynq')
         self.bitstream_dir = os.environ.get('PYNQ_BITSTREAM_DIR', '/opt/bitstreams')
+    
+    def _load_from_file(self):
+        """Carica configurazione da file YAML"""
+        print(f"[DEBUG] Loading config from: {self.config_file}")
+        
+        try:
+            with open(self.config_file, 'r') as f:
+                data = yaml.safe_load(f)
+            
+            print(f"[DEBUG] Loaded data: {data}")
+            
+            self.tenants = {}
+            for tenant_data in data.get('tenants', []):
+                tenant = TenantConfig(
+                    tenant_id=tenant_data['id'],
+                    uid=tenant_data['uid'],
+                    gid=tenant_data['gid'],
+                    api_key=tenant_data.get('api_key', ''),
+                    max_overlays=tenant_data.get('max_overlays', 2),
+                    max_buffers=tenant_data.get('max_buffers', 10),
+                    max_memory_mb=tenant_data.get('max_memory_mb', 256),
+                    allowed_bitstreams=set(tenant_data.get('allowed_bitstreams', [])),
+                    allowed_address_ranges=[
+                        tuple(r) for r in tenant_data.get('allowed_address_ranges', [])
+                    ]
+                )
+                self.tenants[tenant.tenant_id] = tenant
+                print(f"[DEBUG] Added tenant: {tenant.tenant_id}")
+                
+        except Exception as e:
+            logger.error(f"Error loading config file: {e}")
+            self.tenants = {}
+            
+    def _load_default_config(self):
+        """Carica configurazione di default per testing"""
+        self.tenants = {}
+        
+        # Tenant di default per testing
+        tenant = TenantConfig(
+            tenant_id='tenant1',
+            uid=1000,
+            gid=1000,
+            api_key='test_key_1',
+            max_overlays=2,
+            max_buffers=10,
+            max_memory_mb=256,
+            allowed_bitstreams={'base.bit', 'conv2d.bit'},
+            allowed_address_ranges=[(0xA0000000, 0xA0010000)]
+        )
+        self.tenants['tenant1'] = tenant
+        print(f"[DEBUG] Loaded default tenant: tenant1")
         
     def add_tenant(self, tenant_config: TenantConfig) -> bool:
         """Aggiunge un nuovo tenant a runtime"""

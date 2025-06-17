@@ -9,11 +9,13 @@ import logging
 import argparse
 from concurrent import futures
 from pathlib import Path
+os.environ['PYNQ_DEBUG_MODE'] = 'true'
+from mock_resource_manager import MockResourceManager as ResourceManager
+print("[DEBUG] Using MockResourceManager, DEBUG MODE ON!")
 
 # Import nostri moduli
-from config import Config
+
 from tenant_manager import TenantManager, TenantResources
-from resource_manager import ResourceManager
 from servicer import PYNQServicer
 import time  # Aggiungi questo
 from config_manager import DynamicConfigManager  # Aggiungi questo
@@ -24,6 +26,19 @@ import pynq_service_pb2_grpc as pb2_grpc
 # Import generated proto
 sys.path.append('./generated')
 import pynq_service_pb2_grpc as pb2_grpc
+DEBUG_MODE = True
+
+
+
+
+# Import management service se presente
+try:
+    from management_service import ManagementServicer
+    MANAGEMENT_ENABLED = True
+except ImportError:
+    print("Warning: Management service not available")
+    MANAGEMENT_ENABLED = False
+
 
 # Setup logging
 logging.basicConfig(
@@ -37,12 +52,14 @@ class PYNQMultiTenantServer:
         logger.info("Initializing PYNQ Multi-Tenant Server")
         
         # Carica configurazione
-        self.config = Config(config_file)
-        
+        self.config_manager = DynamicConfigManager(config_file)
+        self.config_manager.register_watcher(self._on_config_change)
         # Inizializza managers
-        self.tenant_manager = TenantManager(self.config.tenants)
+        self.tenant_manager = TenantManager(self.config_manager.tenants)
         self.resource_manager = ResourceManager(self.tenant_manager)
-        
+
+       
+        self.resource_manager = ResourceManager(self.tenant_manager)
         # Server gRPC per tenant
         self.servers = {}
         self.management_server = None  # Aggiungi questo
@@ -52,10 +69,10 @@ class PYNQMultiTenantServer:
     
     def _create_tenant_server(self, tenant_id: str) -> grpc.Server:
         """Crea server gRPC per un tenant"""
-        tenant_config = self.config.tenants[tenant_id]
+        tenant_config = self.config_manager.tenants[tenant_id]
         
         # Socket path
-        socket_path = os.path.join(self.config.socket_dir, f"{tenant_id}.sock")
+        socket_path = os.path.join(self.config_manager.socket_dir, f"{tenant_id}.sock")
         
         # Rimuovi socket esistente
         if os.path.exists(socket_path):
@@ -90,10 +107,10 @@ class PYNQMultiTenantServer:
         logger.info("Starting PYNQ Multi-Tenant Server")
         
         # Crea directory socket
-        os.makedirs(self.config.socket_dir, exist_ok=True)
-        
+        os.makedirs(self.config_manager.socket_dir, exist_ok=True)
+        self._start_management_server()
         # Avvia server per ogni tenant
-        for tenant_id in self.config.tenants:
+        for tenant_id in self.config_manager.tenants:
             server = self._create_tenant_server(tenant_id)
             server.start()
             self.servers[tenant_id] = server
@@ -277,7 +294,7 @@ def main():
     parser.add_argument(
         '-c', '--config',
         help='Configuration file path',
-        default='/etc/pynq/config.yaml'
+        default='config-dev.yaml' if DEBUG_MODE else '/etc/pynq/config.yaml'
     )
     parser.add_argument(
         '-d', '--debug',

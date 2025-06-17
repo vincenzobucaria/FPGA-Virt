@@ -6,12 +6,12 @@ from typing import Dict
 
 # Import generated proto
 import sys
-sys.path.append('./generated')
+sys.path.append('../Proto/generated')
 import pynq_service_pb2 as pb2
 import pynq_service_pb2_grpc as pb2_grpc
 
-from .tenant_manager import TenantManager
-from .resource_manager import ResourceManager
+from tenant_manager import TenantManager
+from mock_resource_manager import MockResourceManager as ResourceManager
 
 logger = logging.getLogger(__name__)
 
