@@ -9,12 +9,14 @@ service PYNQService {
     
     // Overlay operations
     rpc LoadOverlay(LoadOverlayRequest) returns (LoadOverlayResponse);
-    rpc GetOverlayInfo(OverlayInfoRequest) returns (OverlayInfoResponse);
+    rpc GetOverlayInfo(GetOverlayInfoRequest) returns (OverlayInfoResponse);
+    rpc UnloadOverlay(UnloadOverlayRequest) returns (Empty);
     
     // MMIO operations
     rpc CreateMMIO(CreateMMIORequest) returns (CreateMMIOResponse);
     rpc MMIORead(MMIOReadRequest) returns (MMIOReadResponse);
     rpc MMIOWrite(MMIOWriteRequest) returns (Empty);
+    rpc ReleaseMMIO(ReleaseMMIORequest) returns (Empty);
     
     // Buffer operations
     rpc AllocateBuffer(AllocateBufferRequest) returns (AllocateBufferResponse);
@@ -23,10 +25,101 @@ service PYNQService {
     rpc FreeBuffer(FreeBufferRequest) returns (Empty);
     
     // DMA operations
+    rpc CreateDMA(CreateDMARequest) returns (CreateDMAResponse);
     rpc DMATransfer(DMATransferRequest) returns (DMATransferResponse);
-    rpc DMAStatus(DMAStatusRequest) returns (DMAStatusResponse);
+    rpc GetDMAStatus(GetDMAStatusRequest) returns (GetDMAStatusResponse);
 }
 
+service PYNQManagementService {
+    // Tenant management
+    rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse);
+    rpc UpdateTenant(UpdateTenantRequest) returns (UpdateTenantResponse);
+    rpc DeleteTenant(DeleteTenantRequest) returns (DeleteTenantResponse);
+    rpc ListTenants(ListTenantsRequest) returns (ListTenantsResponse);
+    
+    // Configuration management
+    rpc AddAllowedBitstream(AddBitstreamRequest) returns (Empty);
+    rpc RemoveAllowedBitstream(RemoveBitstreamRequest) returns (Empty);
+    rpc UpdateTenantLimits(UpdateLimitsRequest) returns (Empty);
+    
+    // Runtime monitoring
+    rpc GetTenantStatus(GetTenantStatusRequest) returns (GetTenantStatusResponse);
+    rpc GetSystemStatus(Empty) returns (SystemStatusResponse);
+}
+
+// Common messages
+message Empty {
+    // Intentionally empty
+}
+
+message Error {
+    uint32 code = 1;
+    string message = 2;
+}
+
+// Session management messages
+message AuthRequest {
+    string tenant_id = 1;
+    string api_key = 2;
+}
+
+message AuthResponse {
+    bool success = 1;
+    string session_token = 2;
+    string message = 3;
+    int64 expires_at = 4;  // Unix timestamp
+}
+
+// Overlay messages
+message LoadOverlayRequest {
+    string bitfile_path = 1;
+    bool download = 2;
+    bool partial_reconfiguration = 3;
+}
+
+message LoadOverlayResponse {
+    string overlay_id = 1;
+    map<string, IPCore> ip_cores = 2;
+    string error = 3;
+}
+
+message IPCore {
+    string name = 1;
+    string type = 2;
+    uint64 base_address = 3;
+    uint32 address_range = 4;
+    map<string, string> parameters = 5;
+}
+
+message GetOverlayInfoRequest {
+    string overlay_id = 1;
+    
+    enum DetailLevel {
+        BASIC = 0;
+        NORMAL = 1;
+        DETAILED = 2;
+    }
+    DetailLevel detail_level = 2;
+    
+    repeated string ip_names = 3;
+}
+
+message OverlayInfoResponse {
+    string overlay_id = 1;
+    map<string, IPCore> ip_cores = 2;
+    int64 loaded_at = 3;
+    
+    string bitfile_path = 4;
+    uint64 bitstream_size = 5;
+    map<string, string> properties = 6;
+}
+
+message UnloadOverlayRequest {
+    string overlay_id = 1;
+    bool force = 2;
+}
+
+// MMIO messages
 message CreateMMIORequest {
     string overlay_id = 1;
     string ip_name = 2;
@@ -36,4 +129,232 @@ message CreateMMIORequest {
 
 message CreateMMIOResponse {
     string handle = 1;
+}
+
+message MMIOReadRequest {
+    string handle = 1;
+    uint32 offset = 2;
+    uint32 length = 3;
+}
+
+message MMIOReadResponse {
+    uint64 value = 1;
+}
+
+message MMIOWriteRequest {
+    string handle = 1;
+    uint32 offset = 2;
+    uint64 value = 3;
+}
+
+message ReleaseMMIORequest {
+    string handle = 1;
+}
+
+// Buffer messages
+message AllocateBufferRequest {
+    uint64 size = 1;
+    uint32 buffer_type = 2;
+    string name = 3;
+}
+
+message AllocateBufferResponse {
+    string handle = 1;
+    uint64 physical_address = 2;
+    uint64 size = 3;
+}
+
+message ReadBufferRequest {
+    string handle = 1;
+    uint64 offset = 2;
+    uint64 length = 3;
+}
+
+message ReadBufferResponse {
+    bytes data = 1;
+}
+
+message WriteBufferRequest {
+    string handle = 1;
+    uint64 offset = 2;
+    bytes data = 3;
+}
+
+message FreeBufferRequest {
+    string handle = 1;
+}
+
+// DMA messages
+message CreateDMARequest {
+    string overlay_id = 1;
+    string dma_name = 2;
+}
+
+message CreateDMAResponse {
+    string handle = 1;
+    bool has_send_channel = 2;
+    bool has_recv_channel = 3;
+}
+
+message DMATransferRequest {
+    string dma_handle = 1;
+    uint32 direction = 2;
+    string buffer_handle = 3;
+    uint64 length = 4;
+    bool wait = 5;
+    uint32 timeout_ms = 6;
+}
+
+message DMATransferResponse {
+    string transfer_id = 1;
+    uint32 status = 2;
+    uint64 bytes_transferred = 3;
+    string error = 4;
+}
+
+message GetDMAStatusRequest {
+    string transfer_id = 1;
+}
+
+message GetDMAStatusResponse {
+    uint32 status = 1;
+    uint64 bytes_transferred = 2;
+}
+
+// Management messages
+message AddressRange {
+    uint64 start = 1;
+    uint64 end = 2;
+}
+
+message CreateTenantRequest {
+    string tenant_id = 1;
+    uint32 uid = 2;
+    uint32 gid = 3;
+    string api_key = 4;
+    
+    message Limits {
+        uint32 max_overlays = 1;
+        uint32 max_buffers = 2;
+        uint32 max_memory_mb = 3;
+    }
+    Limits limits = 5;
+    
+    repeated string allowed_bitstreams = 6;
+    repeated AddressRange allowed_address_ranges = 7;
+}
+
+message CreateTenantResponse {
+    bool success = 1;
+    string message = 2;
+    string socket_path = 3;
+}
+
+message UpdateTenantRequest {
+    string tenant_id = 1;
+    
+    message Updates {
+        string api_key = 1;
+        CreateTenantRequest.Limits limits = 2;
+        repeated string add_bitstreams = 3;
+        repeated string remove_bitstreams = 4;
+        repeated AddressRange add_address_ranges = 5;
+        repeated AddressRange remove_address_ranges = 6;
+    }
+    Updates updates = 2;
+}
+
+message UpdateTenantResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message DeleteTenantRequest {
+    string tenant_id = 1;
+    bool force = 2;
+}
+
+message DeleteTenantResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message ListTenantsRequest {
+    bool include_status = 1;
+}
+
+message ListTenantsResponse {
+    repeated TenantInfo tenants = 1;
+}
+
+message TenantInfo {
+    string tenant_id = 1;
+    uint32 uid = 2;
+    uint32 gid = 3;
+    CreateTenantRequest.Limits limits = 4;
+    repeated string allowed_bitstreams = 5;
+    TenantStatus status = 6;
+}
+
+message TenantStatus {
+    bool online = 1;
+    uint32 active_overlays = 2;
+    uint32 active_buffers = 3;
+    uint64 memory_used_bytes = 4;
+    int64 last_activity = 5;
+}
+
+message AddBitstreamRequest {
+    string tenant_id = 1;
+    string bitstream = 2;
+}
+
+message RemoveBitstreamRequest {
+    string tenant_id = 1;
+    string bitstream = 2;
+}
+
+message UpdateLimitsRequest {
+    string tenant_id = 1;
+    
+    message NewLimits {
+        uint32 max_overlays = 1;
+        uint32 max_buffers = 2;
+        uint32 max_memory_mb = 3;
+    }
+    NewLimits limits = 2;
+}
+
+message GetTenantStatusRequest {
+    string tenant_id = 1;
+    bool include_resources = 2;
+}
+
+message GetTenantStatusResponse {
+    TenantInfo info = 1;
+    
+    message ActiveResources {
+        repeated string overlay_ids = 1;
+        repeated string mmio_handles = 2;
+        repeated string buffer_handles = 3;
+        repeated string dma_handles = 4;
+    }
+    ActiveResources resources = 2;
+}
+
+message SystemStatusResponse {
+    uint32 total_tenants = 1;
+    uint32 online_tenants = 2;
+    uint64 total_memory_used = 3;
+    uint32 total_overlays_loaded = 4;
+    
+    message SystemResources {
+        uint64 total_memory_available = 1;
+        uint64 total_memory_used = 2;
+        float cpu_usage_percent = 3;
+        uint32 active_connections = 4;
+    }
+    SystemResources system = 5;
+    
+    repeated TenantInfo tenants = 6;
 }

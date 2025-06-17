@@ -8,3 +8,4 @@ pynq==3.0.1  # o la tua versione
 
 # Utilities
 pyyaml==6.0
+pyyaml
