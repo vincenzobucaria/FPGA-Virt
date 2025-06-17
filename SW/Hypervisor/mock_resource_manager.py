@@ -159,7 +159,7 @@ class MockResourceManager:
                         'type': str(ip.get('type', '')),
                         'base_address': base_addr,
                         'address_range': addr_range,
-                        'parameters': ip.get('parameters', {})
+                        'parameters': {k: str(v) for k, v in ip.get('parameters', {}).items()}
                     }
             
             logger.info(f"[MOCK] Overlay loaded successfully: {handle}")

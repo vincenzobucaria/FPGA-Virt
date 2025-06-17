@@ -60,12 +60,19 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
         """Carica overlay"""
         tenant_id = self._get_tenant_id(context)
         logger.info(f"LoadOverlay request from {tenant_id}: {request.bitfile_path}")
+        logger.info(f"LoadOverlay request from {tenant_id}: {request.bitfile_path}")
         
+        # Debug dettagliato
+        logger.info(f"[DEBUG] tenant_id type: {type(tenant_id)}, value: {tenant_id}")
+        logger.info(f"[DEBUG] bitfile_path type: {type(request.bitfile_path)}, value: {request.bitfile_path}")
+        logger.info(f"[DEBUG] resource_manager: {self.resource_manager}")
         try:
             overlay_id, ip_cores = self.resource_manager.load_overlay(
                 tenant_id, 
                 request.bitfile_path
             )
+            logger.info(f"[DEBUG] overlay_id: {overlay_id}")
+            logger.info(f"[DEBUG] ip_cores: {ip_cores}")
             
             # Converti IP cores in formato proto
             proto_ip_cores = {}
@@ -86,7 +93,9 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
         except Exception as e:
             logger.error(f"LoadOverlay error: {e}")
             context.abort(grpc.StatusCode.INTERNAL, str(e))
-    
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
     def GetOverlayInfo(self, request, context):
         """Ottieni info overlay"""
         tenant_id = self._get_tenant_id(context)
