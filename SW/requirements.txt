@@ -1,0 +1,10 @@
+# gRPC e Protocol Buffers
+grpcio==1.60.0
+grpcio-tools==1.60.0
+protobuf==4.25.1
+
+# PYNQ (solo per hypervisor)
+pynq==3.0.1  # o la tua versione
+
+# Utilities
+pyyaml==6.0

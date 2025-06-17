@@ -1,0 +1,39 @@
+// proto/pynq_service.proto
+syntax = "proto3";
+
+package pynq;
+
+service PYNQService {
+    // Session management
+    rpc Authenticate(AuthRequest) returns (AuthResponse);
+    
+    // Overlay operations
+    rpc LoadOverlay(LoadOverlayRequest) returns (LoadOverlayResponse);
+    rpc GetOverlayInfo(OverlayInfoRequest) returns (OverlayInfoResponse);
+    
+    // MMIO operations
+    rpc CreateMMIO(CreateMMIORequest) returns (CreateMMIOResponse);
+    rpc MMIORead(MMIOReadRequest) returns (MMIOReadResponse);
+    rpc MMIOWrite(MMIOWriteRequest) returns (Empty);
+    
+    // Buffer operations
+    rpc AllocateBuffer(AllocateBufferRequest) returns (AllocateBufferResponse);
+    rpc ReadBuffer(ReadBufferRequest) returns (ReadBufferResponse);
+    rpc WriteBuffer(WriteBufferRequest) returns (Empty);
+    rpc FreeBuffer(FreeBufferRequest) returns (Empty);
+    
+    // DMA operations
+    rpc DMATransfer(DMATransferRequest) returns (DMATransferResponse);
+    rpc DMAStatus(DMAStatusRequest) returns (DMAStatusResponse);
+}
+
+message CreateMMIORequest {
+    string overlay_id = 1;
+    string ip_name = 2;
+    uint64 base_address = 3;
+    uint32 length = 4;
+}
+
+message CreateMMIOResponse {
+    string handle = 1;
+}
