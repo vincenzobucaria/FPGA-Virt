@@ -62,7 +62,7 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
         """Carica overlay"""
         tenant_id = self._get_tenant_id(context)
         logger.info(f"LoadOverlay request from {tenant_id}: {request.bitfile_path}")
-        
+        print(request.bitfile_path)
         try:
             overlay_id, ip_cores = self.resource_manager.load_overlay(
                 tenant_id, 

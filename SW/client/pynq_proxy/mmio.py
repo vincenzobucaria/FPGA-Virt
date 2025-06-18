@@ -81,7 +81,7 @@ class MMIO:
             
         return response.value
     
-    def write(self, offset: int, value: int, length: int = 4):
+    def write(self, offset: int, value: int):
         """
         Write to MMIO register - STESSA API di PYNQ!
         
@@ -90,13 +90,15 @@ class MMIO:
         offset : int
             Offset dal base address
         value : int
-            Valore da scrivere
-        length : int
-            Numero di bytes da scrivere (1, 2, 4, o 8)
+            Valore da scrivere (32-bit)
         """
-        if offset + length > self.length:
-            raise ValueError(f"Accessing outside MMIO range: {offset} + {length} > {self.length}")
+        if offset < 0 or offset >= self.length:
+            raise ValueError(f"Offset {offset} outside MMIO range [0, {self.length})")
             
+        # Verifica che il valore sia nel range 32-bit
+        if value < 0 or value > 0xFFFFFFFF:
+            raise ValueError(f"Value {value} outside 32-bit range")
+        
         request = pb2.MMIOWriteRequest(
             handle=self._handle,
             offset=offset,
@@ -107,20 +109,22 @@ class MMIO:
         
         if self.debug:
             logger.debug(f"MMIO write: 0x{self.base_addr + offset:08x} = 0x{value:08x}")
-    
-    # Metodi helper per compatibilità PYNQ
+
     def write_mm(self, offset: int, data: bytes):
         """Write a block of bytes to MMIO"""
         for i in range(0, len(data), 4):
             if i + 4 <= len(data):
                 value = int.from_bytes(data[i:i+4], byteorder='little')
-                self.write(offset + i, value, 4)
+                self.write(offset + i, value)  # NO length parameter!
             else:
-                # Handle remaining bytes
+                # Handle remaining bytes - but MMIO typically only supports 32-bit writes
                 remaining = len(data) - i
-                value = int.from_bytes(data[i:i+remaining], byteorder='little')
-                self.write(offset + i, value, remaining)
-    
+                if remaining > 0:
+                    # Pad with zeros to make a full 32-bit write
+                    padded = data[i:] + b'\x00' * (4 - remaining)
+                    value = int.from_bytes(padded[:4], byteorder='little')
+                    self.write(offset + i, value)
+
     def read_mm(self, offset: int, length: int) -> bytes:
         """Read a block of bytes from MMIO"""
         data = bytearray()
@@ -129,7 +133,9 @@ class MMIO:
                 value = self.read(offset + i, 4)
                 data.extend(value.to_bytes(4, byteorder='little'))
             else:
+                # Read the last partial word
+                value = self.read(offset + i, 4)  # Always read 32-bit
                 remaining = length - i
-                value = self.read(offset + i, remaining)
-                data.extend(value.to_bytes(remaining, byteorder='little'))
+                # Take only the bytes we need
+                data.extend(value.to_bytes(4, byteorder='little')[:remaining])
         return bytes(data)

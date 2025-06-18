@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# test_pynq_api_compatibility.py
+# test_register_mmio_simple.py
 
 import os
 import sys
@@ -7,93 +7,90 @@ import sys
 # Setup
 os.environ['TENANT_ID'] = 'tenant1'
 os.environ['PYNQ_API_KEY'] = 'test_key_1'
-os.environ['PYNQ_DEBUG_MODE'] = 'false'
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from client.pynq_proxy import Overlay, MMIO, allocate
+from client.pynq_proxy import Overlay
 
-def test_pynq_api():
-    print("=== Testing PYNQ API Compatibility ===\n")
+def test_simple():
+    print("=== Simple Register Map vs MMIO Test ===\n")
     
-
-
-      # 3. Test Overlay e accesso IP
-    print("\n3. Overlay and IP access...")
-
+    # 1. Load overlay
+    print("1. Loading overlay...")
     overlay = Overlay('conv2d.bit')
-    print(overlay.ip_dict)
-    conv2d = overlay.custom_accel_0
+    print("✅ Overlay loaded\n")
+    
+    # 2. Get conv2d IP
+    print("2. Accessing conv2d IP...")
+    conv2d = overlay.conv2d_0
+    print(f"✅ Got conv2d at address 0x{conv2d.base_addr:08X}\n")
+    
+    # 3. Test writing via register_map, reading via MMIO
+    print("3. Write via register_map, read via MMIO:")
+    print("-" * 40)
+    
+    # Write some test values via register_map
+    test_values = {
+        'N': 2,
+        'C_in': 3,
+        'H_in': 224,
+        'W_in': 224
+    }
+    
+    for reg_name, value in test_values.items():
+        # Write using register_map
+        setattr(conv2d.register_map, reg_name, value)
+        print(f"   Wrote {reg_name} = {value} via register_map")
+        
+        # Read back using direct MMIO
+        offset = conv2d.register_map._registers[reg_name]['offset']
+        read_value = conv2d.read(offset)
+        
+        if read_value == value:
+            print(f"   ✅ Read back {read_value} via MMIO @ offset 0x{offset:04X}")
+        else:
+            print(f"   ❌ Read back {read_value} (expected {value})")
+        print()
+    
+    # 4. Test writing via MMIO, reading via register_map
+    print("\n4. Write via MMIO, read via register_map:")
+    print("-" * 40)
+    
+    # Different test values
+    test_values_2 = {
+        'K_h': 5,
+        'K_w': 5,
+        'stride': 2,
+        'padding': 1
+    }
+    
+    for reg_name, value in test_values_2.items():
+        # Get offset
+        offset = conv2d.register_map._registers[reg_name]['offset']
+        
+        # Write using direct MMIO
+        conv2d.write(offset, value)
+        print(f"   Wrote {value} to offset 0x{offset:04X} via MMIO")
+        
+        # Read back using register_map
+        read_value = getattr(conv2d.register_map, reg_name)
+        
+        if read_value == value:
+            print(f"   ✅ Read back {reg_name} = {read_value} via register_map")
+        else:
+            print(f"   ❌ Read back {reg_name} = {read_value} (expected {value})")
+        print()
+    
+    # 5. Show final register state
+    print("\n5. Final register state:")
+    print("-" * 40)
     print(conv2d.register_map)
-    conv2d.register_map.N = 5
-
-    print(conv2d.register_map.N)
-
-    print("\n3. Verifica con MMIO diretto")
-    value_direct = conv2d.read(0x20)  # N è a offset 0x20
-    print(f"   MMIO read(0x20) = {value_direct}")
-    # 1. Test MMIO creazione diretta - IDENTICO A PYNQ!
-    print("1. Direct MMIO creation (PYNQ compatible API)...")
-    print("\n4. Scrittura diretta MMIO")
-    conv2d.write(0x28, 3)  # C_in a offset 0x28
-    print("   Scritto 3 a offset 0x28 (C_in)")
-
-    # 5. Leggi via register_map
-    print("\n5. Lettura via register_map")
-    c_in = conv2d.register_map.C_in
-    print(f"   register_map.C_in = {c_in}")
-    # In PYNQ reale:
-    # from pynq import MMIO
-    # mmio = MMIO(0xA0000000, 0x10000)
     
-    # Nel nostro proxy - STESSA IDENTICA API:
-    mmio = MMIO(0xA0000000, 0x10000)
-    print(f"✅ MMIO created with PYNQ API: MMIO(0xA0000000, 0x10000)")
-    
-    # Test operazioni
-    mmio.write(0x00, 0xDEADBEEF)
-    value = mmio.read(0x00)
-    print(f"✅ Write/Read: 0x{value:08X}")
-    """"""
-    print("Buffer allocation and access...")
-
-    buffer = allocate(shape=(10,), dtype='uint32')
-    buffer[:] = range(10)
-   
-
-
-    print(f"✅ Buffer allocated: shape={buffer.shape}, dtype={buffer.dtype}")
-    print(f"   Physical address: 0x{buffer.physical_address:08X}")
-    print(f"   Shared memory name: {buffer._shm_name}")
-    print(f"   Buffer data: {buffer[:]}")
-
-
-
-    print("Buffer 2 allocation and access...")
-
-    buffer2 = allocate(shape=(10,), dtype='uint32')
-    buffer2[:] = range(10)
-   
-
-   
-    print(f"✅ Buffer allocated: shape={buffer2.shape}, dtype={buffer2.dtype}")
-    print(f"   Physical address: 0x{buffer2.physical_address:08X}")
-    print(f"   Shared memory name: {buffer2._shm_name}")
-    print(f"   Buffer data: {buffer2[:]}")
-    # In PYNQ: overlay.ip_name è un MMIO o wrapper specifico
-    # Nel nostro caso è sempre MMIO con API compatibile
-    """
-    gpio = overlay.axi_gpio_0  
-    print(f"✅ IP access: overlay.axi_gpio_0 is MMIO-compatible")
-    print(f"   Base: 0x{gpio.base_addr:08X}, Length: 0x{gpio.length:X}")
-    """
-    # 4. Test metodi MMIO aggiuntivi
-    print("\n4. Testing MMIO block operations...")
-    test_data = b'\x01\x02\x03\x04\x05\x06\x07\x08'
-    mmio.write_mm(0x100, test_data)
-    read_data = mmio.read_mm(0x100, 8)
-    print(f"✅ Block write/read: {read_data.hex()}")
-    
-    print("\n✅ All tests passed - API is PYNQ compatible!")
+    print("\n✅ Test completed!")
 
 if __name__ == '__main__':
-    test_pynq_api()
+    try:
+        test_simple()
+    except Exception as e:
+        print(f"\n❌ Test failed: {e}")
+        import traceback
+        traceback.prin

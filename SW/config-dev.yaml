@@ -7,7 +7,6 @@ tenants:
     max_buffers: 10
     max_memory_mb: 256
     allowed_bitstreams:
-      - "base.bit"
       - "conv2d.bit"
     allowed_address_ranges:
       - [0xA0000000, 0x10000]
