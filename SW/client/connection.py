@@ -2,6 +2,7 @@
 import os
 import grpc
 import logging
+import atexit
 from typing import Optional, Dict, Any
 import sys
 
@@ -13,7 +14,7 @@ import pynq_service_pb2_grpc as pb2_grpc
 logger = logging.getLogger(__name__)
 
 class Connection:
-    """Singleton connection manager per PYNQ proxy"""
+    """Singleton connection manager per PYNQ proxy con cleanup automatico"""
     _instance = None
     
     def __new__(cls):
@@ -30,7 +31,11 @@ class Connection:
         self.channel = None
         self.stub = None
         self.token = None
+        self._resources_created = False  # Track se sono state create risorse
         self._initialized = True
+        
+        # Registra cleanup automatico all'uscita
+        atexit.register(self._cleanup_on_exit)
         
     def connect(self):
         """Stabilisce connessione con il server"""
@@ -76,6 +81,10 @@ class Connection:
             
         metadata = [('auth-token', self.token)]
         
+        # Traccia se vengono create risorse
+        if method_name in ['LoadOverlay', 'CreateMMIO', 'AllocateBuffer', 'CreateDMA']:
+            self._resources_created = True
+        
         try:
             method = getattr(self.stub, method_name)
             return method(request, metadata=metadata)
@@ -88,3 +97,48 @@ class Connection:
                 metadata = [('auth-token', self.token)]
                 return method(request, metadata=metadata)
             raise
+    
+    def cleanup_resources(self):
+        """Pulisce esplicitamente tutte le risorse sul server"""
+        if not self.channel or not self.token:
+            return
+            
+        try:
+            metadata = [('auth-token', self.token)]
+            response = self.stub.CleanupResources(pb2.Empty(), metadata=metadata)
+            
+            if response.success:
+                logger.info(f"Resources cleaned up: {response.message}")
+                if response.resources_freed:
+                    for rtype, count in response.resources_freed.items():
+                        if count > 0:
+                            logger.info(f"  - {rtype}: {count}")
+                self._resources_created = False
+            else:
+                logger.error(f"Cleanup failed: {response.message}")
+                
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+    
+    def _cleanup_on_exit(self):
+        """Cleanup automatico all'uscita del programma"""
+        if self._resources_created:
+            logger.info("Performing automatic cleanup on exit...")
+            self.cleanup_resources()
+        
+        if self.channel:
+            self.channel.close()
+            self.channel = None
+            self.stub = None
+            self.token = None
+    
+    def disconnect(self):
+        """Disconnessione manuale con cleanup"""
+        self.cleanup_resources()
+        self._cleanup_on_exit()
+        
+        # Deregistra da atexit per evitare doppio cleanup
+        try:
+            atexit.unregister(self._cleanup_on_exit)
+        except:
+            pass

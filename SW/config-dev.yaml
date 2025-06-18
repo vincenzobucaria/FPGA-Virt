@@ -10,4 +10,6 @@ tenants:
       - "base.bit"
       - "conv2d.bit"
     allowed_address_ranges:
-      - [0xA0000000, 0xA0010000]
+      - [0xA0000000, 0x10000]
+      - [0xA0010000, 0x10000]  # axi_gpio_0
+      - [0xA0020000, 0x10000]  # axi_gpio_0

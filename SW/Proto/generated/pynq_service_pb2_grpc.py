@@ -109,6 +109,21 @@ class PYNQServiceStub(object):
                 request_serializer=pynq__service__pb2.GetDMAStatusRequest.SerializeToString,
                 response_deserializer=pynq__service__pb2.GetDMAStatusResponse.FromString,
                 _registered_method=True)
+        self.CleanupResources = channel.unary_unary(
+                '/pynq.PYNQService/CleanupResources',
+                request_serializer=pynq__service__pb2.Empty.SerializeToString,
+                response_deserializer=pynq__service__pb2.CleanupResponse.FromString,
+                _registered_method=True)
+        self.Disconnect = channel.unary_unary(
+                '/pynq.PYNQService/Disconnect',
+                request_serializer=pynq__service__pb2.Empty.SerializeToString,
+                response_deserializer=pynq__service__pb2.DisconnectResponse.FromString,
+                _registered_method=True)
+        self.Heartbeat = channel.unary_unary(
+                '/pynq.PYNQService/Heartbeat',
+                request_serializer=pynq__service__pb2.Empty.SerializeToString,
+                response_deserializer=pynq__service__pb2.HeartbeatResponse.FromString,
+                _registered_method=True)
 
 
 class PYNQServiceServicer(object):
@@ -209,6 +224,28 @@ class PYNQServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CleanupResources(self, request, context):
+        """Cleanup resources
+
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Disconnect(self, request, context):
+        """Disconnessione esplicita (opzionale)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Heartbeat(self, request, context):
+        """Heartbeat per mantenere sessione attiva (opzionale)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_PYNQServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -286,6 +323,21 @@ def add_PYNQServiceServicer_to_server(servicer, server):
                     servicer.GetDMAStatus,
                     request_deserializer=pynq__service__pb2.GetDMAStatusRequest.FromString,
                     response_serializer=pynq__service__pb2.GetDMAStatusResponse.SerializeToString,
+            ),
+            'CleanupResources': grpc.unary_unary_rpc_method_handler(
+                    servicer.CleanupResources,
+                    request_deserializer=pynq__service__pb2.Empty.FromString,
+                    response_serializer=pynq__service__pb2.CleanupResponse.SerializeToString,
+            ),
+            'Disconnect': grpc.unary_unary_rpc_method_handler(
+                    servicer.Disconnect,
+                    request_deserializer=pynq__service__pb2.Empty.FromString,
+                    response_serializer=pynq__service__pb2.DisconnectResponse.SerializeToString,
+            ),
+            'Heartbeat': grpc.unary_unary_rpc_method_handler(
+                    servicer.Heartbeat,
+                    request_deserializer=pynq__service__pb2.Empty.FromString,
+                    response_serializer=pynq__service__pb2.HeartbeatResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -693,6 +745,87 @@ class PYNQService(object):
             '/pynq.PYNQService/GetDMAStatus',
             pynq__service__pb2.GetDMAStatusRequest.SerializeToString,
             pynq__service__pb2.GetDMAStatusResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CleanupResources(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/pynq.PYNQService/CleanupResources',
+            pynq__service__pb2.Empty.SerializeToString,
+            pynq__service__pb2.CleanupResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Disconnect(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/pynq.PYNQService/Disconnect',
+            pynq__service__pb2.Empty.SerializeToString,
+            pynq__service__pb2.DisconnectResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Heartbeat(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/pynq.PYNQService/Heartbeat',
+            pynq__service__pb2.Empty.SerializeToString,
+            pynq__service__pb2.HeartbeatResponse.FromString,
             options,
             channel_credentials,
             insecure,

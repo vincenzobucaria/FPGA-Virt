@@ -3,7 +3,10 @@ import threading
 import time
 from typing import Dict, Optional, Set
 from dataclasses import dataclass, field
+import logging
 from config import TenantConfig
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TenantSession:
@@ -104,7 +107,24 @@ class TenantManager:
         if not config.allowed_address_ranges:
             return True  # Nessuna restrizione
             
-        for start, end in config.allowed_address_ranges:
-            if start <= address and (address + size) <= end:
+        # FIX: interpreta correttamente come (base, size) non (start, end)
+        for base, range_size in config.allowed_address_ranges:
+            # Verifica se il range richiesto è dentro uno permesso
+            if address >= base and (address + size) <= (base + range_size):
                 return True
+        
+        # Debug per capire perché fallisce
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Address check failed for tenant {tenant_id}:")
+        logger.debug(f"  Requested: 0x{address:08X} size 0x{size:X}")
+        logger.debug(f"  Allowed ranges:")
+        for base, range_size in config.allowed_address_ranges:
+            logger.debug(f"    0x{base:08X} - 0x{base + range_size:08X}")
+        
         return False
+    def reset_tenant_resources(self, tenant_id: str):
+        """Reset risorse tracked per un tenant dopo cleanup"""
+        if tenant_id in self.resources:
+            self.resources[tenant_id] = TenantResources()
+            logger.info(f"Reset resource tracking for tenant {tenant_id}")

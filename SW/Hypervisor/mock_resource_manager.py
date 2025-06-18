@@ -7,7 +7,9 @@ import random
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
 import logging
-
+import numpy as np
+from multiprocessing import shared_memory
+import mmap
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -26,27 +28,66 @@ class MockOverlay:
         logger.info(f"[MOCK] Loaded overlay: {bitfile_path}")
     
     def _generate_mock_ip_dict(self):
-        """Genera IP cores fittizi per testing"""
+        """Genera IP cores fittizi per testing con register map"""
         return {
             'axi_dma_0': {
                 'phys_addr': 0xA0000000,
                 'addr_range': 0x10000,
                 'type': 'xilinx.com:ip:axi_dma:7.1',
-                'parameters': {'data_width': 32}
+                'parameters': {'data_width': 32},
+                'registers': {
+                    'MM2S_DMACR': {'offset': 0x00, 'description': 'MM2S DMA Control'},
+                    'MM2S_DMASR': {'offset': 0x04, 'description': 'MM2S DMA Status'},
+                    'MM2S_SA': {'offset': 0x18, 'description': 'MM2S Source Address'},
+                    'MM2S_LENGTH': {'offset': 0x28, 'description': 'MM2S Transfer Length'},
+                    'S2MM_DMACR': {'offset': 0x30, 'description': 'S2MM DMA Control'},
+                    'S2MM_DMASR': {'offset': 0x34, 'description': 'S2MM DMA Status'},
+                    'S2MM_DA': {'offset': 0x48, 'description': 'S2MM Destination Address'},
+                    'S2MM_LENGTH': {'offset': 0x58, 'description': 'S2MM Transfer Length'}
+                }
             },
             'axi_gpio_0': {
                 'phys_addr': 0xA0010000,
                 'addr_range': 0x10000,
                 'type': 'xilinx.com:ip:axi_gpio:2.0',
-                'parameters': {'gpio_width': 32}
+                'parameters': {'gpio_width': 32},
+                'registers': {
+                    'GPIO_DATA': {'offset': 0x00, 'description': 'GPIO Data Register'},
+                    'GPIO_TRI': {'offset': 0x04, 'description': 'GPIO 3-state Control'},
+                    'GPIO2_DATA': {'offset': 0x08, 'description': 'GPIO2 Data Register'},
+                    'GPIO2_TRI': {'offset': 0x0C, 'description': 'GPIO2 3-state Control'},
+                    'GIER': {'offset': 0x11C, 'description': 'Global Interrupt Enable'},
+                    'IP_IER': {'offset': 0x128, 'description': 'IP Interrupt Enable'},
+                    'IP_ISR': {'offset': 0x120, 'description': 'IP Interrupt Status'}
+                }
             },
             'custom_accel_0': {
                 'phys_addr': 0xA0020000,
                 'addr_range': 0x10000,
                 'type': 'custom:hls:accelerator:1.0',
-                'parameters': {}
+                'parameters': {},
+                'registers': {
+                    # Registri di controllo standard HLS
+                    'CTRL': {'offset': 0x00, 'description': 'Control signals'},
+                    'GIE': {'offset': 0x04, 'description': 'Global Interrupt Enable'},
+                    'IER': {'offset': 0x08, 'description': 'IP Interrupt Enable'},
+                    'ISR': {'offset': 0x0C, 'description': 'IP Interrupt Status'},
+                    # Registri per gli indirizzi dei buffer
+                    'input': {'offset': 0x10, 'description': 'Input buffer address'},
+                    'output': {'offset': 0x18, 'description': 'Output buffer address'},
+                    # Registri per i parametri della convoluzione
+                    'N': {'offset': 0x20, 'description': 'Batch size'},
+                    'C_in': {'offset': 0x28, 'description': 'Input channels'},
+                    'H_in': {'offset': 0x30, 'description': 'Input height'},
+                    'W_in': {'offset': 0x38, 'description': 'Input width'},
+                    'C_out': {'offset': 0x40, 'description': 'Output channels'},
+                    'K_h': {'offset': 0x48, 'description': 'Kernel height'},
+                    'K_w': {'offset': 0x50, 'description': 'Kernel width'},
+                    'stride': {'offset': 0x58, 'description': 'Stride'},
+                    'padding': {'offset': 0x60, 'description': 'Padding'}
+                }
             }
-        }
+        }   
 
 class MockMMIO:
     def __init__(self, base_address, length):
@@ -57,7 +98,6 @@ class MockMMIO:
     
     def read(self, offset, length=4):
         """Simula lettura MMIO con validazione migliorata"""
-        # Validazione già fatta nel ResourceManager, ma doppio controllo non fa male
         if offset < 0 or offset >= self.length:
             raise Exception(f"MMIO read offset {offset} out of range [0, {self.length})")
         
@@ -68,11 +108,11 @@ class MockMMIO:
         if offset + length > self.length:
             raise Exception(f"MMIO read would exceed bounds")
         
-        # Leggi valore byte per byte (più realistico)
+        # Leggi valore byte per byte
         value = 0
         for i in range(length):
             byte_offset = offset + i
-            byte_val = self._memory.get(byte_offset, 0)  # Default a 0 se non inizializzato
+            byte_val = self._memory.get(byte_offset, 0)
             value |= (byte_val << (i * 8))
         
         logger.debug(f"[MOCK] MMIO read: offset=0x{offset:04x}, length={length}, value=0x{value:08x}")
@@ -80,7 +120,6 @@ class MockMMIO:
     
     def write(self, offset, value, length=4):
         """Simula scrittura MMIO con validazione migliorata"""
-        # Validazione già fatta nel ResourceManager, ma doppio controllo non fa male
         if offset < 0 or offset >= self.length:
             raise Exception(f"MMIO write offset {offset} out of range [0, {self.length})")
         
@@ -91,7 +130,7 @@ class MockMMIO:
         if offset + length > self.length:
             raise Exception(f"MMIO write would exceed bounds")
         
-        # Scrivi valore byte per byte (più realistico)
+        # Scrivi valore byte per byte
         for i in range(length):
             byte_offset = offset + i
             byte_val = (value >> (i * 8)) & 0xFF
@@ -100,15 +139,58 @@ class MockMMIO:
         logger.debug(f"[MOCK] MMIO write: offset=0x{offset:04x}, value=0x{value:08x}, length={length}")
 
 class MockBuffer:
-    def __init__(self, size):
-        self.size = size
-        self.physical_address = random.randint(0x80000000, 0x90000000)
-        self.data = bytearray(size)
-        logger.info(f"[MOCK] Allocated buffer: size={size}, phys_addr=0x{self.physical_address:08x}")
+    """Buffer migliorato con supporto numpy e shared memory"""
     
-    def freebuffer(self):
-        """Simula deallocazione buffer"""
+    def __init__(self, shape, dtype='uint8', use_shared_memory=True):
+        # Parametri base
+        self.shape = shape if isinstance(shape, tuple) else (shape,)
+        self.dtype = np.dtype(dtype)
+        self.size = np.prod(self.shape) * self.dtype.itemsize
+        
+        # Indirizzo fisico simulato
+        self.physical_address = random.randint(0x80000000, 0x90000000)
+        
+        # Crea backing storage
+        if use_shared_memory:
+            # Usa shared memory per zero-copy con client locali
+            self.shm = shared_memory.SharedMemory(create=True, size=self.size)
+            self.shm_name = self.shm.name
+            # Numpy array su shared memory
+            self.data = np.ndarray(self.shape, dtype=self.dtype, buffer=self.shm.buf)
+        else:
+            # Buffer normale in memoria
+            self.shm = None
+            self.shm_name = None
+            self.data = np.zeros(self.shape, dtype=self.dtype)
+        
+        logger.info(f"[MOCK] Allocated buffer: shape={shape}, dtype={dtype}, "
+                   f"size={self.size} bytes, phys_addr=0x{self.physical_address:08x}, "
+                   f"shm={self.shm_name}")
+    
+    def read(self, offset=0, length=None):
+        """Leggi dati come bytes"""
+        if length is None:
+            return self.data.tobytes()[offset:]
+        return self.data.tobytes()[offset:offset+length]
+    
+    def write(self, data_bytes, offset=0):
+        """Scrivi bytes nel buffer"""
+        # Converti bytes in array numpy
+        temp_array = np.frombuffer(data_bytes, dtype=self.dtype)
+        # Calcola quanti elementi copiare
+        elements_to_copy = min(len(temp_array), self.data.size - offset // self.dtype.itemsize)
+        # Copia nel buffer
+        flat_view = self.data.flat
+        start_idx = offset // self.dtype.itemsize
+        flat_view[start_idx:start_idx + elements_to_copy] = temp_array[:elements_to_copy]
+    
+    def cleanup(self):
+        """Pulisci risorse"""
+        if self.shm:
+            self.shm.close()
+            self.shm.unlink()
         logger.info(f"[MOCK] Freed buffer at 0x{self.physical_address:08x}")
+
 
 class MockDMA:
     def __init__(self, name):
@@ -175,37 +257,30 @@ class MockResourceManager:
             # Prepara risposta con IP cores
             ip_cores = {}
             for name, ip in overlay.ip_dict.items():
+                
                 # Filtra solo IP accessibili al tenant
                 base_addr = ip.get('phys_addr', 0)
                 addr_range = ip.get('addr_range', 0)
-                
                 if self.tenant_manager.is_address_allowed(tenant_id, base_addr, addr_range):
+                    print("ALLOWED: ", name, ip)
                     ip_cores[name] = {
                         'name': name,
                         'type': str(ip.get('type', '')),
                         'base_address': base_addr,
                         'address_range': addr_range,
-                        'parameters': {k: str(v) for k, v in ip.get('parameters', {}).items()}
-                    }
+                        'parameters': {k: str(v) for k, v in ip.get('parameters', {}).items()},
+                        'registers': ip.get('registers', {})  # <-- AGGIUNGI QUESTA RIGA
+                    }                
             
             logger.info(f"[MOCK] Overlay loaded successfully: {handle}")
             return handle, ip_cores
     
-    def create_mmio(self, tenant_id: str, overlay_id: str, ip_name: str,
-                    base_address: int, length: int) -> str:
-        """Simula creazione MMIO"""
+    def create_mmio(self, tenant_id: str, base_address: int, length: int) -> str:
+        """Crea MMIO - SEMPLIFICATO senza overlay_id"""
         with self._lock:
-            # Verifica che l'overlay appartenga al tenant
-            if overlay_id not in self._resources:
-                raise Exception("Overlay not found")
-                
-            resource = self._resources[overlay_id]
-            if resource.tenant_id != tenant_id:
-                raise Exception("Overlay not owned by tenant")
-            
-            # Verifica permessi indirizzo
+            # UNICA verifica necessaria: il tenant può accedere a questo indirizzo?
             if not self.tenant_manager.is_address_allowed(tenant_id, base_address, length):
-                raise Exception("Address not allowed")
+                raise Exception(f"Tenant {tenant_id} not allowed to access address 0x{base_address:08x}")
             
             # Crea MMIO mock
             mmio = MockMMIO(base_address, length)
@@ -221,8 +296,6 @@ class MockResourceManager:
                 resource_type="mmio",
                 created_at=time.time(),
                 metadata={
-                    "overlay_id": overlay_id,
-                    "ip_name": ip_name,
                     "base_address": base_address,
                     "length": length
                 }
@@ -231,7 +304,7 @@ class MockResourceManager:
             # Registra con tenant manager
             self.tenant_manager.resources[tenant_id].mmio_handles.add(handle)
             
-            logger.info(f"[MOCK] MMIO created: {handle}")
+            logger.info(f"[MOCK] MMIO created: {handle} for tenant {tenant_id} at 0x{base_address:08x}")
             return handle
     
     def mmio_read(self, tenant_id: str, handle: str, offset: int, length: int) -> int:
@@ -288,7 +361,7 @@ class MockResourceManager:
             if offset < 0:
                 raise Exception(f"Negative offset not allowed: {offset}")
             
-            # Verifica che offset sia nel range (per scrittura singola)
+            # Verifica che offset sia nel range
             if offset >= mmio_length:
                 raise Exception(f"Write offset out of bounds: offset {offset} >= MMIO size {mmio_length}")
             
@@ -312,15 +385,22 @@ class MockResourceManager:
             
             logger.debug(f"MMIO write by {tenant_id}: handle={handle}, addr=0x{actual_address:08x}, value=0x{value:08x}")
     
-    def allocate_buffer(self, tenant_id: str, size: int, buffer_type: int) -> Tuple[str, int]:
-        """Simula allocazione buffer"""
+    def allocate_buffer(self, tenant_id: str, shape, dtype='uint8') -> Dict:
+        """Alloca buffer con supporto numpy e shared memory"""
         with self._lock:
+            # Calcola size
+            np_shape = tuple(shape) if isinstance(shape, (list, tuple)) else (shape,)
+            size = np.prod(np_shape) * np.dtype(dtype).itemsize
+            
             # Verifica limiti
             if not self.tenant_manager.can_allocate_buffer(tenant_id, size):
                 raise Exception("Buffer allocation limit reached")
             
+            # Decidi se usare shared memory
+            use_shm = size > 1024  # Usa shm per buffer > 1KB
+            
             # Alloca buffer mock
-            buffer = MockBuffer(size)
+            buffer = MockBuffer(np_shape, dtype, use_shared_memory=use_shm)
             
             # Genera handle
             handle = self._generate_handle("buffer")
@@ -333,9 +413,11 @@ class MockResourceManager:
                 resource_type="buffer",
                 created_at=time.time(),
                 metadata={
+                    "shape": np_shape,
+                    "dtype": str(dtype),
                     "size": size,
-                    "type": buffer_type,
-                    "physical_address": buffer.physical_address
+                    "physical_address": buffer.physical_address,
+                    "shm_name": buffer.shm_name
                 }
             )
             
@@ -344,18 +426,59 @@ class MockResourceManager:
             self.tenant_manager.resources[tenant_id].total_memory_bytes += size
             
             logger.info(f"[MOCK] Buffer allocated: {handle}")
-            return handle, buffer.physical_address
+            
+            # Ritorna info complete per il client
+            return {
+                'handle': handle,
+                'physical_address': buffer.physical_address,
+                'total_size': size,
+                'shm_name': buffer.shm_name,
+                'shape': np_shape,
+                'dtype': str(dtype)
+            }
     
-    def create_dma(self, tenant_id: str, overlay_id: str, dma_name: str) -> Tuple[str, Dict]:
-        """Simula creazione DMA"""
+    def read_buffer(self, tenant_id: str, handle: str, offset: int, length: int) -> bytes:
+        """Leggi dati da buffer"""
         with self._lock:
-            # Verifica overlay
-            if overlay_id not in self._resources:
-                raise Exception("Overlay not found")
+            # Verifica ownership
+            if handle not in self._resources:
+                raise Exception("Buffer handle not found")
                 
-            resource = self._resources[overlay_id]
+            resource = self._resources[handle]
             if resource.tenant_id != tenant_id:
-                raise Exception("Overlay not owned by tenant")
+                raise Exception("Buffer not owned by tenant")
+            
+            # Leggi dati
+            buffer = self._buffers[handle]
+            return buffer.read(offset, length)
+    
+    def write_buffer(self, tenant_id: str, handle: str, data: bytes, offset: int):
+        """Scrivi dati in buffer"""
+        with self._lock:
+            # Verifica ownership
+            if handle not in self._resources:
+                raise Exception("Buffer handle not found")
+                
+            resource = self._resources[handle]
+            if resource.tenant_id != tenant_id:
+                raise Exception("Buffer not owned by tenant")
+            
+            # Scrivi dati
+            buffer = self._buffers[handle]
+            buffer.write(data, offset)
+
+    
+    def create_dma(self, tenant_id: str, dma_name: str) -> Tuple[str, Dict]:
+        """Crea DMA - SEMPLIFICATO senza overlay_id"""
+        with self._lock:
+            # Verifica che il tenant abbia almeno un overlay caricato
+            tenant_overlays = [
+                res for _, res in self._resources.items()
+                if res.tenant_id == tenant_id and res.resource_type == "overlay"
+            ]
+            
+            if not tenant_overlays:
+                raise Exception("No overlay loaded for tenant")
             
             # Crea DMA mock
             dma = MockDMA(dma_name)
@@ -371,7 +494,6 @@ class MockResourceManager:
                 resource_type="dma",
                 created_at=time.time(),
                 metadata={
-                    "overlay_id": overlay_id,
                     "dma_name": dma_name
                 }
             )
@@ -387,7 +509,35 @@ class MockResourceManager:
             
             logger.info(f"[MOCK] DMA created: {handle}")
             return handle, info
-    
+        
+        
+    def get_tenant_resources_summary(self, tenant_id: str) -> dict:
+        """Ottieni riepilogo risorse allocate per un tenant"""
+        with self._lock:
+            resources = {
+                'overlays': 0,
+                'mmios': 0,
+                'buffers': 0,
+                'dmas': 0,
+                'total_memory': 0
+            }
+            
+            for handle, resource in self._resources.items():
+                if resource.tenant_id == tenant_id:
+                    if resource.resource_type == "overlay":
+                        resources['overlays'] += 1
+                    elif resource.resource_type == "mmio":
+                        resources['mmios'] += 1
+                    elif resource.resource_type == "buffer":
+                        resources['buffers'] += 1
+                        resources['total_memory'] += resource.metadata.get('size', 0)
+                    elif resource.resource_type == "dma":
+                        resources['dmas'] += 1
+            
+            return resources
+
+
+
     def cleanup_tenant_resources(self, tenant_id: str):
         """Pulisce tutte le risorse di un tenant"""
         with self._lock:
@@ -418,8 +568,9 @@ class MockResourceManager:
             logger.info(f"[MOCK] Cleaned MMIO: {handle}")
         elif resource.resource_type == "buffer":
             buffer = self._buffers[handle]
-            buffer.freebuffer()
+            buffer.cleanup()  # <-- FIX: era freebuffer()
             del self._buffers[handle]
+            logger.info(f"[MOCK] Cleaned buffer: {handle}")
         elif resource.resource_type == "dma":
             del self._dmas[handle]
             logger.info(f"[MOCK] Cleaned DMA: {handle}")

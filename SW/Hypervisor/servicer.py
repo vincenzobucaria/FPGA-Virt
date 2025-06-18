@@ -3,7 +3,7 @@ import grpc
 import time
 import logging
 from typing import Dict
-
+from tenant_manager import TenantManager, TenantResources
 # Import generated proto
 import sys
 sys.path.append('../Proto/generated')
@@ -56,6 +56,8 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
         )
     
     # Overlay operations
+# Sostituisci il metodo LoadOverlay nel servicer con questo:
+
     def LoadOverlay(self, request, context):
         """Carica overlay"""
         tenant_id = self._get_tenant_id(context)
@@ -71,13 +73,25 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
             # Converti IP cores in formato proto
             proto_ip_cores = {}
             for name, ip_info in ip_cores.items():
-                proto_ip_cores[name] = pb2.IPCore(
+                # Crea IPCore base
+                proto_ip_core = pb2.IPCore(
                     name=ip_info['name'],
                     type=ip_info['type'],
                     base_address=ip_info['base_address'],
                     address_range=ip_info['address_range'],
                     parameters=ip_info['parameters']
                 )
+                
+                # AGGIUNGI I REGISTRI SE PRESENTI - METODO CORRETTO!
+                if 'registers' in ip_info and ip_info['registers']:
+                    for reg_name, reg_info in ip_info['registers'].items():
+                        # Crea il registro direttamente nel map
+                        proto_ip_core.registers[reg_name].offset = reg_info['offset']
+                        proto_ip_core.registers[reg_name].description = reg_info.get('description', '')
+                    
+                    logger.debug(f"Added {len(ip_info['registers'])} registers to {name}")
+                
+                proto_ip_cores[name] = proto_ip_core
             
             return pb2.LoadOverlayResponse(
                 overlay_id=overlay_id,
@@ -88,7 +102,7 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
             logger.error(f"LoadOverlay error: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
-            context.abort(grpc.StatusCode.INTERNAL, str(e))
+            context.abort(grpc.StatusCode.INTERNAL, str(e)) 
     
     def GetOverlayInfo(self, request, context):
         """Ottieni info overlay"""
@@ -100,35 +114,16 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
             loaded_at=int(time.time())
         )
     
-    # MMIO operations
+    # MMIO operations - SEMPLIFICATO!
     def CreateMMIO(self, request, context):
-        """Crea handle MMIO"""
+        """Crea handle MMIO - ora molto più semplice!"""
         tenant_id = self._get_tenant_id(context)
-        logger.info(f"CreateMMIO request from {tenant_id}")
-        
-        overlay_id = request.overlay_id
-        
-        # Se l'overlay_id è "current", trova l'ultimo overlay caricato dal tenant
-        if overlay_id == "current":
-            # Trova l'ultimo overlay del tenant
-            tenant_overlays = [
-                (handle, res) for handle, res in self.resource_manager._resources.items()
-                if res.tenant_id == tenant_id and res.resource_type == "overlay"
-            ]
-            
-            if tenant_overlays:
-                # Prendi il più recente basandosi su created_at
-                overlay_id = max(tenant_overlays, key=lambda x: x[1].created_at)[0]
-                logger.info(f"Found current overlay: {overlay_id}")
-            else:
-                context.abort(grpc.StatusCode.FAILED_PRECONDITION, "No overlay loaded")
+        logger.info(f"CreateMMIO request from {tenant_id} for address 0x{request.base_address:08x}")
         
         try:
-            # Ora overlay_id contiene l'handle corretto
+            # Chiama direttamente create_mmio senza overlay_id
             handle = self.resource_manager.create_mmio(
                 tenant_id,
-                overlay_id,  # Usa l'overlay_id risolto
-                request.ip_name,
                 request.base_address,
                 request.length
             )
@@ -178,39 +173,78 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
     
     # Buffer operations
     def AllocateBuffer(self, request, context):
-        """Alloca buffer"""
+        """Alloca buffer e ritorna info per il client"""
         tenant_id = self._get_tenant_id(context)
-        logger.info(f"AllocateBuffer request from {tenant_id}: {request.size} bytes")
+        
+        # Parsing parametri
+        shape = list(request.shape) if request.shape else [1024]  # default 1D
+        dtype = request.dtype if request.dtype else 'uint8'
+        
+        logger.info(f"AllocateBuffer request from {tenant_id}: shape={shape}, dtype={dtype}")
         
         try:
-            handle, phys_addr = self.resource_manager.allocate_buffer(
+            # Alloca tramite resource manager
+            buffer_info = self.resource_manager.allocate_buffer(
                 tenant_id,
-                request.size,
-                request.buffer_type
+                shape,
+                dtype
             )
             
-            return pb2.AllocateBufferResponse(
-                handle=handle,
-                physical_address=phys_addr,
-                size=request.size
+            # Costruisci risposta
+            response = pb2.AllocateBufferResponse(
+                handle=buffer_info['handle'],
+                physical_address=buffer_info['physical_address'],
+                size=buffer_info['total_size'],
+                shape=buffer_info['shape'],
+                dtype=buffer_info['dtype']
             )
+            
+            # Se shared memory disponibile, aggiungi info
+            if buffer_info['shm_name']:
+                print(f"Using shared memory: {buffer_info['shm_name']}")
+                response.shm_name = buffer_info['shm_name']
+            
+            return response
             
         except Exception as e:
             logger.error(f"AllocateBuffer error: {e}")
             context.abort(grpc.StatusCode.INTERNAL, str(e))
     
-    # Altri metodi da implementare...
     def ReadBuffer(self, request, context):
-        """Leggi da buffer - TODO"""
+        """Leggi dati da buffer"""
         tenant_id = self._get_tenant_id(context)
-        # TODO: Implementare lettura buffer
-        return pb2.ReadBufferResponse(data=b'')
+        
+        try:
+            data = self.resource_manager.read_buffer(
+                tenant_id,
+                request.handle,
+                request.offset,
+                request.length
+            )
+            
+            return pb2.ReadBufferResponse(data=data)
+            
+        except Exception as e:
+            logger.error(f"ReadBuffer error: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
     
     def WriteBuffer(self, request, context):
-        """Scrivi su buffer - TODO"""
+        """Scrivi dati in buffer"""
         tenant_id = self._get_tenant_id(context)
-        # TODO: Implementare scrittura buffer
-        return pb2.Empty()
+        
+        try:
+            self.resource_manager.write_buffer(
+                tenant_id,
+                request.handle,
+                request.data,
+                request.offset
+            )
+            
+            return pb2.Empty()
+            
+        except Exception as e:
+            logger.error(f"WriteBuffer error: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
     
     def FreeBuffer(self, request, context):
         """Libera buffer - TODO"""
@@ -219,29 +253,14 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
         return pb2.Empty()
     
     def CreateDMA(self, request, context):
-        """Crea DMA handle"""
+        """Crea DMA handle - SEMPLIFICATO!"""
         tenant_id = self._get_tenant_id(context)
-        logger.info(f"CreateDMA request from {tenant_id}")
-        
-        overlay_id = request.overlay_id
-        
-        # Gestisci "current" come in CreateMMIO
-        if overlay_id == "current":
-            tenant_overlays = [
-                (handle, res) for handle, res in self.resource_manager._resources.items()
-                if res.tenant_id == tenant_id and res.resource_type == "overlay"
-            ]
-            
-            if tenant_overlays:
-                overlay_id = max(tenant_overlays, key=lambda x: x[1].created_at)[0]
-                logger.info(f"Found current overlay for DMA: {overlay_id}")
-            else:
-                context.abort(grpc.StatusCode.FAILED_PRECONDITION, "No overlay loaded")
+        logger.info(f"CreateDMA request from {tenant_id}: {request.dma_name}")
         
         try:
+            # Chiama direttamente create_dma senza overlay_id
             handle, info = self.resource_manager.create_dma(
                 tenant_id,
-                overlay_id,
                 request.dma_name
             )
             
@@ -267,3 +286,38 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
         tenant_id = self._get_tenant_id(context)
         # TODO: Implementare stato DMA
         return pb2.GetDMAStatusResponse(status=0)
+    
+    def CleanupResources(self, request, context):
+        """Pulisci tutte le risorse del tenant corrente"""
+        tenant_id = self._get_tenant_id(context)
+        logger.info(f"Cleanup resources request from tenant {tenant_id}")
+        
+        try:
+            # Ottieni riepilogo prima del cleanup
+            summary = self.resource_manager.get_tenant_resources_summary(tenant_id)
+            
+            # Esegui cleanup
+            self.resource_manager.cleanup_tenant_resources(tenant_id)
+            
+            # Pulisci anche dal tenant manager
+            if tenant_id in self.tenant_manager.resources:
+                self.tenant_manager.resources[tenant_id] = TenantResources()
+            
+            message = (f"Cleaned up: {summary['overlays']} overlays, "
+                    f"{summary['mmios']} MMIOs, {summary['buffers']} buffers, "
+                    f"{summary['dmas']} DMAs, {summary['total_memory']} bytes")
+            
+            logger.info(f"Cleanup completed for {tenant_id}: {message}")
+            
+            return pb2.CleanupResponse(
+                success=True,
+                message=message,
+                resources_freed=summary
+            )
+            
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
+            return pb2.CleanupResponse(
+                success=False,
+                message=str(e)
+            )    

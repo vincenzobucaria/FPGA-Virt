@@ -28,6 +28,17 @@ service PYNQService {
     rpc CreateDMA(CreateDMARequest) returns (CreateDMAResponse);
     rpc DMATransfer(DMATransferRequest) returns (DMATransferResponse);
     rpc GetDMAStatus(GetDMAStatusRequest) returns (GetDMAStatusResponse);
+
+    //Cleanup resources
+
+    rpc CleanupResources(Empty) returns (CleanupResponse);
+    
+    // Disconnessione esplicita (opzionale)
+    rpc Disconnect(Empty) returns (DisconnectResponse);
+    
+    // Heartbeat per mantenere sessione attiva (opzionale)
+    rpc Heartbeat(Empty) returns (HeartbeatResponse);
+
 }
 
 service PYNQManagementService {
@@ -83,12 +94,14 @@ message LoadOverlayResponse {
     string error = 3;
 }
 
+// Modifica IPCore per includere registri
 message IPCore {
     string name = 1;
     string type = 2;
     uint64 base_address = 3;
     uint32 address_range = 4;
     map<string, string> parameters = 5;
+    map<string, RegisterInfo> registers = 6;  // <-- AGGIUNGI QUESTO
 }
 
 message GetOverlayInfoRequest {
@@ -151,33 +164,34 @@ message ReleaseMMIORequest {
     string handle = 1;
 }
 
-// Buffer messages
 message AllocateBufferRequest {
-    uint64 size = 1;
-    uint32 buffer_type = 2;
-    string name = 3;
+    repeated int32 shape = 1;      // es. [1024, 1024] per matrice
+    string dtype = 2;              // es. "float32", "uint8"
 }
 
 message AllocateBufferResponse {
     string handle = 1;
-    uint64 physical_address = 2;
-    uint64 size = 3;
+    repeated int32 shape = 2;
+    string dtype = 3;
+    int64 size = 4;
+    optional string shm_name = 5;         // Nome shared memory se disponibile
+    optional uint64 physical_address = 6;  // Per compatibilità DMA futura
 }
 
 message ReadBufferRequest {
     string handle = 1;
-    uint64 offset = 2;
-    uint64 length = 3;
+    int64 offset = 2;              // Offset in bytes
+    int64 length = 3;              // Bytes da leggere
 }
 
 message ReadBufferResponse {
-    bytes data = 1;
+    bytes data = 1;                // Dati letti
 }
 
 message WriteBufferRequest {
     string handle = 1;
-    uint64 offset = 2;
-    bytes data = 3;
+    int64 offset = 2;              // Offset in bytes
+    bytes data = 3;                // Dati da scrivere
 }
 
 message FreeBufferRequest {
@@ -358,3 +372,26 @@ message SystemStatusResponse {
     
     repeated TenantInfo tenants = 6;
 }
+
+message CleanupResponse {
+    bool success = 1;
+    string message = 2;
+    map<string, int32> resources_freed = 3;  // tipo_risorsa -> count
+}
+
+// Messaggio per disconnessione (opzionale)
+message DisconnectResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Messaggio per heartbeat (opzionale)
+message HeartbeatResponse {
+    int64 timestamp = 1;
+}
+
+message RegisterInfo {
+    uint32 offset = 1;
+    string description = 2;
+}
+
