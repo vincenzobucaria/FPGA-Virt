@@ -89,7 +89,7 @@ class PYNQResourceManager:
                     asyncio.set_event_loop(loop)
                     
                     # Carica overlay - usa il path passato invece di hardcoded
-                    overlay = PYNQOverlay('/home/xilinx/conv2d.bit')
+                    overlay = PYNQOverlay('/home/xilinx/vector_sum.bit')
                     
                     # Cleanup loop
                     loop.close()
