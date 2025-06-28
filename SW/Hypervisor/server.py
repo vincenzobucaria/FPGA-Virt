@@ -9,6 +9,8 @@ import logging
 import argparse
 from concurrent import futures
 from pathlib import Path
+from pynq import Overlay
+
 
 # Determina quale resource manager usare
 USE_REAL_PYNQ = os.environ.get('USE_REAL_PYNQ', 'false').lower() == 'true'
@@ -56,8 +58,7 @@ class PYNQMultiTenantServer:
         
         # Inizializza managers
         self.tenant_manager = TenantManager(self.config_manager.tenants)
-        self.resource_manager = ResourceManager(self.tenant_manager)
-        
+        self.resource_manager = ResourceManager(self.tenant_manager, self.config_manager)
         # Server gRPC per tenant
         self.servers = {}
         self.management_server = None

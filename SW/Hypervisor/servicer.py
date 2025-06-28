@@ -309,15 +309,33 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
             
             logger.info(f"Cleanup completed for {tenant_id}: {message}")
             
+            # FIX: Costruisci correttamente resources_freed
+            # Il proto si aspetta valori interi, non liste
+            resources_freed = {
+                'overlays': summary['overlays'],
+                'mmios': summary['mmios'],
+                'buffers': summary['buffers'],
+                'dmas': summary['dmas'],
+                'total_memory': summary['total_memory']
+            }
+            
+            # Se il proto include pr_zones, aggiungi anche quello
+            # ma verifica che sia il tipo giusto (potrebbe aspettarsi repeated int32)
+            # Per ora lo omettiamo dal dict se causa problemi
+            
             return pb2.CleanupResponse(
                 success=True,
                 message=message,
-                resources_freed=summary
+                resources_freed=resources_freed
             )
             
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            
             return pb2.CleanupResponse(
                 success=False,
-                message=str(e)
-            )    
+                message=str(e),
+                resources_freed={}  # Dict vuoto in caso di errore
+            )  

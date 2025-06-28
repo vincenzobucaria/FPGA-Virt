@@ -1,25 +1,16 @@
-# hypervisor/pynq_resource_manager.py - Complete version with PR zones and DFX support
+# hypervisor/pynq_resource_manager.py - CODICE COMPLETO con single thread
 import os
 import threading
 import uuid
 import time
-import asyncio
 from typing import Dict, Optional, Tuple, List, Set
 from dataclasses import dataclass
 import logging
 import numpy as np
-import concurrent.futures
-
-# Import PYNQ reale
-from pynq import Overlay as PYNQOverlay
-from pynq import allocate as pynq_allocate
-from pynq.mmio import MMIO as PYNQMMIO
-from pynq import Bitstream
-import pynq.lib.dma
 
 # Import nostri moduli
 from pr_zone_manager import PRZoneManager
-from dfx_decoupler_manager import DFXDecouplerManager
+from hardware_thread_manager import get_hardware_thread_manager
 
 logger = logging.getLogger(__name__)
 
@@ -33,16 +24,12 @@ class ManagedResource:
     pynq_object: any = None
 
 class PYNQResourceManager:
-    """Resource Manager che usa PYNQ hardware reale con supporto PR zones e DFX"""
+    """Resource Manager che usa un singolo thread per tutte le operazioni hardware"""
     
     def __init__(self, tenant_manager, config_manager=None):
         self.tenant_manager = tenant_manager
         self.config_manager = config_manager
         self._resources: Dict[str, ManagedResource] = {}
-        self._overlays: Dict[str, PYNQOverlay] = {}
-        self._mmios: Dict[str, PYNQMMIO] = {}
-        self._buffers: Dict[str, any] = {}
-        self._dmas: Dict[str, any] = {}
         self._lock = threading.RLock()
         
         # Directory bitstream
@@ -50,85 +37,24 @@ class PYNQResourceManager:
         if config_manager:
             self.bitstream_dir = config_manager.bitstream_dir
         
-        # Carica shell statica (full.bit)
-        self.static_overlay = None
-        self._initialize_static_overlay()
+        # Ottieni il manager del thread hardware
+        self.hw_manager = get_hardware_thread_manager()
         
-        # Inizializza PR Zone Manager
-        num_pr_zones = 2  # Default
+        # Avvia il thread hardware se non è già attivo
+        self.hw_manager.start()
+        
+        # Inizializza PR Zone Manager (locale, non hardware)
+        num_pr_zones = 2
         if config_manager and hasattr(config_manager, 'num_pr_zones'):
             num_pr_zones = config_manager.num_pr_zones
-        
+            
         self.pr_zone_manager = PRZoneManager(num_pr_zones)
-        
-        # Inizializza DFX Decoupler Manager
-        self.dfx_manager = DFXDecouplerManager(self.static_overlay)
-        self._initialize_dfx_decouplers()
         
         # Mappa degli indirizzi per PR zone
         self.pr_zone_addresses = {}
         self._initialize_pr_zone_addresses()
         
-        # Crea event loop per PYNQ se non esiste
-        try:
-            self._loop = asyncio.get_event_loop()
-        except RuntimeError:
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
-        
-        logger.info(f"[PYNQ] Initialized Resource Manager with {num_pr_zones} PR zones and DFX support")
-    
-    def _initialize_static_overlay(self):
-        """Carica la shell statica all'avvio"""
-        static_bitstream = '/home/xilinx/bitstreams/full.bit'
-        if self.config_manager and hasattr(self.config_manager, 'static_bitstream'):
-            static_bitstream = self.config_manager.static_bitstream
-        
-        logger.info(f"[PYNQ] Loading static overlay: {static_bitstream}")
-        
-        try:
-            # Carica in un thread separato per evitare problemi con event loop
-            def load_static():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    self.static_overlay = PYNQOverlay(static_bitstream)
-                finally:
-                    loop.close()
-            
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(load_static)
-                future.result()
-            
-            logger.info("[PYNQ] Static overlay loaded successfully")
-
-            logger.info("[PYNQ] Static overlay details: ", dir(self.static_overlay) )
-            
-            
-        except Exception as e:
-            logger.error(f"[PYNQ] Failed to load static overlay: {e}")
-            raise RuntimeError(f"Cannot initialize without static overlay: {e}")
-    
-    def _initialize_dfx_decouplers(self):
-        """Inizializza i DFX decouplers dalla configurazione"""
-        if not self.config_manager:
-            # Default configuration
-            self.dfx_manager.register_decoupler(0, "axi_gpio_0")
-            self.dfx_manager.register_decoupler(1, "axi_gpio_1")
-            return
-        
-        # Leggi configurazione PR zones
-        pr_zones_config = getattr(self.config_manager, 'pr_zones', [])
-        for zone_config in pr_zones_config:
-            zone_id = zone_config.zone_id if hasattr(zone_config, 'zone_id') else zone_config.get('zone_id')
-            dfx_decoupler = zone_config.dfx_decoupler if hasattr(zone_config, 'dfx_decoupler') else zone_config.get('dfx_decoupler')
-            
-            if zone_id is not None and dfx_decoupler:
-                self.dfx_manager.register_decoupler(zone_id, dfx_decoupler)
-                logger.info(f"[PYNQ] Registered DFX decoupler {dfx_decoupler} for zone {zone_id}")
-        
-        # Assicurati che tutte le zone siano accoppiate all'avvio
-        self.dfx_manager.ensure_all_coupled()
+        logger.info("[PYNQ] Resource Manager initialized with single hardware thread")
     
     def _initialize_pr_zone_addresses(self):
         """Inizializza la mappa degli indirizzi per PR zone"""
@@ -154,27 +80,9 @@ class PYNQResourceManager:
         """Genera handle univoco"""
         return f"{prefix}_{uuid.uuid4().hex[:8]}"
     
-    def _run_in_loop(self, coro):
-        """Esegue coroutine nel loop asyncio"""
-        try:
-            if asyncio.get_running_loop() == self._loop:
-                return asyncio.create_task(coro).result()
-        except RuntimeError:
-            pass
-        
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result()
-    
     def load_overlay(self, tenant_id: str, bitfile_path: str) -> Tuple[str, Dict]:
         """
-        Carica overlay parziale con gestione DFX e PR zones.
-        
-        Args:
-            tenant_id: ID del tenant
-            bitfile_path: Path del bitstream richiesto
-            
-        Returns:
-            Tuple di (overlay_handle, ip_cores_dict)
+        Carica overlay usando il thread hardware dedicato.
         """
         with self._lock:
             # Verifica permessi base
@@ -201,7 +109,7 @@ class PYNQResourceManager:
             
             zone_id, actual_bitstream_path = result
             
-            # Verifica che il tenant possa usare questa zona
+            # Verifica permessi zona
             if hasattr(tenant_config, 'allowed_pr_zones'):
                 if zone_id not in tenant_config.allowed_pr_zones:
                     raise Exception(f"Tenant {tenant_id} not allowed to use PR zone {zone_id}")
@@ -209,8 +117,15 @@ class PYNQResourceManager:
             logger.info(f"[PYNQ] Loading partial bitstream {actual_bitstream_path} "
                        f"in PR zone {zone_id} for tenant {tenant_id}")
             
-            # Esegui riconfigurazione parziale con DFX
-            success = self.dfx_manager.reconfigure_pr_zone(zone_id, actual_bitstream_path)
+            # IMPORTANTE: Esegui la riconfigurazione nel thread hardware dedicato
+            try:
+                success = self.hw_manager.load_pr_bitstream(
+                    tenant_id, zone_id, actual_bitstream_path
+                )
+            except Exception as e:
+                logger.error(f"[PYNQ] Hardware operation failed: {e}")
+                raise Exception(f"Failed to load bitstream: {e}")
+            
             if not success:
                 raise Exception(f"Failed to reconfigure PR zone {zone_id}")
             
@@ -235,7 +150,7 @@ class PYNQResourceManager:
                     "requested_bitfile": bitfile_path,
                     "partial": True
                 },
-                pynq_object=None  # Bitstream parziali non hanno overlay object
+                pynq_object=None
             )
             
             # Registra con tenant manager
@@ -245,15 +160,12 @@ class PYNQResourceManager:
             ip_cores = self._get_pr_zone_ip_cores(zone_id)
             
             logger.info(f"[PYNQ] Partial bitstream loaded successfully: {handle} "
-                       f"in PR zone {zone_id} with {len(ip_cores)} accessible IPs")
+                       f"in PR zone {zone_id}")
             
             return handle, ip_cores
     
     def _get_pr_zone_ip_cores(self, zone_id: int) -> Dict:
-        """
-        Ottieni gli IP cores per una specifica PR zone.
-        Questo dovrebbe essere configurato in base al tuo design.
-        """
+        """Ottieni gli IP cores per una specifica PR zone"""
         ip_cores = {}
         
         # Ottieni indirizzi per questa zona
@@ -278,9 +190,8 @@ class PYNQResourceManager:
         return ip_cores
     
     def get_ip_object(self, tenant_id: str, overlay_handle: str, ip_name: str):
-        """Ottieni l'oggetto IP PYNQ reale per interazioni dirette"""
+        """Ottieni l'oggetto IP - non disponibile per bitstream parziali"""
         with self._lock:
-            # Verifica che l'overlay appartenga al tenant
             if overlay_handle not in self._resources:
                 raise Exception("Overlay handle not found")
             
@@ -289,28 +200,24 @@ class PYNQResourceManager:
                 raise Exception("Overlay not owned by tenant")
             
             # Per bitstream parziali, non c'è un vero oggetto IP PYNQ
-            # Ritorna None o crea un wrapper
             if resource.metadata.get('partial', False):
                 logger.warning(f"IP objects not available for partial bitstreams")
                 return None
             
-            # Per overlay completi (non implementato in questa versione)
             raise NotImplementedError("Full overlay IP objects not implemented")
     
     def create_mmio(self, tenant_id: str, base_address: int, length: int) -> str:
-        """Crea MMIO verificando che l'indirizzo sia permesso per le PR zones del tenant"""
+        """Crea MMIO usando il thread hardware dedicato"""
         with self._lock:
-            # Prima verifica quale PR zone sta usando il tenant
+            # Verifica permessi
             tenant_zones = self.pr_zone_manager.get_tenant_zones(tenant_id)
             
-            # Verifica che l'indirizzo sia permesso per almeno una delle zone del tenant
             address_allowed = False
             allowed_zone = None
             
             for zone_id in tenant_zones:
                 zone_addresses = self.pr_zone_addresses.get(zone_id, [])
                 for allowed_base, allowed_size in zone_addresses:
-                    # Verifica se l'indirizzo richiesto è dentro il range permesso
                     if (base_address >= allowed_base and 
                         base_address + length <= allowed_base + allowed_size):
                         address_allowed = True
@@ -320,32 +227,23 @@ class PYNQResourceManager:
                     break
             
             if not address_allowed:
-                # Se il tenant non ha zone allocate, nega l'accesso
                 if not tenant_zones:
                     raise Exception(f"Tenant {tenant_id} has no PR zones allocated")
-                
-                # Log dettagliato per debug
-                logger.warning(f"Address 0x{base_address:08x} not allowed for tenant {tenant_id}")
-                logger.warning(f"Tenant zones: {tenant_zones}")
-                for zone_id in tenant_zones:
-                    logger.warning(f"  Zone {zone_id} addresses: {self.pr_zone_addresses.get(zone_id, [])}")
-                
-                raise Exception(f"Address 0x{base_address:08x} not allowed for tenant's PR zones")
+                raise Exception(f"Address 0x{base_address:08x} not allowed")
             
             logger.info(f"[PYNQ] Creating MMIO at 0x{base_address:08x} for zone {allowed_zone}")
             
-            # Crea MMIO PYNQ reale
+            # IMPORTANTE: Crea MMIO nel thread hardware
             try:
-                mmio = PYNQMMIO(base_address, length)
+                hw_handle = self.hw_manager.create_mmio(tenant_id, base_address, length)
             except Exception as e:
                 logger.error(f"[PYNQ] Failed to create MMIO: {e}")
                 raise Exception(f"Failed to create MMIO: {e}")
             
-            # Genera handle
+            # Genera handle locale
             handle = self._generate_handle("mmio")
             
             # Salva riferimenti
-            self._mmios[handle] = mmio
             self._resources[handle] = ManagedResource(
                 handle=handle,
                 tenant_id=tenant_id,
@@ -354,19 +252,20 @@ class PYNQResourceManager:
                 metadata={
                     "base_address": base_address,
                     "length": length,
-                    "pr_zone": allowed_zone
+                    "pr_zone": allowed_zone,
+                    "hw_handle": hw_handle  # Handle nel thread hardware
                 },
-                pynq_object=mmio
+                pynq_object=None
             )
             
             # Registra con tenant manager
             self.tenant_manager.resources[tenant_id].mmio_handles.add(handle)
             
-            logger.info(f"[PYNQ] MMIO created: {handle} for tenant {tenant_id} at 0x{base_address:08x}")
+            logger.info(f"[PYNQ] MMIO created: {handle} at 0x{base_address:08x}")
             return handle
     
     def mmio_read(self, tenant_id: str, handle: str, offset: int, length: int = 4) -> int:
-        """Legge da MMIO hardware reale con controlli di sicurezza"""
+        """Legge da MMIO usando il thread hardware"""
         with self._lock:
             # Verifica ownership
             if handle not in self._resources:
@@ -376,31 +275,27 @@ class PYNQResourceManager:
             if resource.tenant_id != tenant_id:
                 raise Exception("MMIO not owned by tenant")
             
-            # Ottieni info dal metadata
-            base_address = resource.metadata['base_address']
+            # Verifica limiti
             mmio_length = resource.metadata['length']
+            if offset < 0 or offset + length > mmio_length:
+                raise Exception("Read out of bounds")
             
-            # Verifica che offset non sia negativo
-            if offset < 0:
-                raise Exception(f"Negative offset not allowed: {offset}")
+            # Ottieni handle hardware
+            hw_handle = resource.metadata.get('hw_handle')
+            if not hw_handle:
+                raise Exception("Hardware handle not found")
             
-            # Verifica che la lettura non vada oltre i limiti del MMIO
-            if offset + length > mmio_length:
-                raise Exception(f"Read out of bounds: offset {offset} + length {length} > MMIO size {mmio_length}")
-            
-            # Ottieni oggetto MMIO PYNQ
-            mmio = self._mmios.get(handle)
-            if not mmio:
-                raise Exception("MMIO object not found")
-            
-            # Leggi valore dall'hardware
-            value = mmio.read(offset, length)
-            
-            logger.debug(f"[PYNQ] MMIO read by {tenant_id}: handle={handle}, offset=0x{offset:04x}, value=0x{value:08x}")
-            return value
-
+            # IMPORTANTE: Leggi nel thread hardware
+            try:
+                value = self.hw_manager.mmio_read(tenant_id, hw_handle, offset, length)
+                logger.debug(f"[PYNQ] MMIO read: offset=0x{offset:04x}, value=0x{value:08x}")
+                return value
+            except Exception as e:
+                logger.error(f"[PYNQ] MMIO read failed: {e}")
+                raise
+    
     def mmio_write(self, tenant_id: str, handle: str, offset: int, value: int):
-        """Scrive su MMIO hardware reale con controlli di sicurezza"""
+        """Scrive su MMIO usando il thread hardware"""
         with self._lock:
             # Verifica ownership
             if handle not in self._resources:
@@ -410,37 +305,29 @@ class PYNQResourceManager:
             if resource.tenant_id != tenant_id:
                 raise Exception("MMIO not owned by tenant")
             
-            # Ottieni info dal metadata
-            base_address = resource.metadata['base_address']
+            # Verifica limiti  
             mmio_length = resource.metadata['length']
+            if offset < 0 or offset + 4 > mmio_length:
+                raise Exception("Write out of bounds")
             
-            # Verifica che offset non sia negativo
-            if offset < 0:
-                raise Exception(f"Negative offset not allowed: {offset}")
-            
-            # Assumiamo scritture a 32-bit (4 bytes) per default
-            length = 4
-            
-            # Verifica che la scrittura non ecceda i limiti
-            if offset + length > mmio_length:
-                raise Exception(f"Write would exceed MMIO bounds: offset {offset} + {length} > MMIO size {mmio_length}")
-            
-            # Verifica che il valore sia nel range 32-bit
             if value < 0 or value > 0xFFFFFFFF:
-                raise Exception(f"Value {value} out of range for 32-bit write")
+                raise Exception(f"Value out of range")
             
-            # Ottieni oggetto MMIO PYNQ
-            mmio = self._mmios.get(handle)
-            if not mmio:
-                raise Exception("MMIO object not found")
+            # Ottieni handle hardware
+            hw_handle = resource.metadata.get('hw_handle')
+            if not hw_handle:
+                raise Exception("Hardware handle not found")
             
-            # Scrivi valore sull'hardware
-            mmio.write(offset, value)
-            
-            logger.debug(f"[PYNQ] MMIO write by {tenant_id}: handle={handle}, offset=0x{offset:04x}, value=0x{value:08x}")
+            # IMPORTANTE: Scrivi nel thread hardware
+            try:
+                self.hw_manager.mmio_write(tenant_id, hw_handle, offset, value)
+                logger.debug(f"[PYNQ] MMIO write: offset=0x{offset:04x}, value=0x{value:08x}")
+            except Exception as e:
+                logger.error(f"[PYNQ] MMIO write failed: {e}")
+                raise
     
     def allocate_buffer(self, tenant_id: str, shape, dtype='uint8') -> Dict:
-        """Alloca buffer su hardware PYNQ reale"""
+        """Alloca buffer usando il thread hardware"""
         with self._lock:
             # Calcola size
             np_shape = tuple(shape) if isinstance(shape, (list, tuple)) else (shape,)
@@ -451,20 +338,19 @@ class PYNQResourceManager:
             if not self.tenant_manager.can_allocate_buffer(tenant_id, size):
                 raise Exception("Buffer allocation limit reached")
             
-            # Alloca buffer PYNQ reale
+            # IMPORTANTE: Alloca nel thread hardware
             try:
-                buffer = pynq_allocate(shape=np_shape, dtype=np_dtype)
-                physical_address = buffer.physical_address
-                
+                hw_handle, physical_address = self.hw_manager.allocate_buffer(
+                    tenant_id, shape, dtype
+                )
             except Exception as e:
                 logger.error(f"[PYNQ] Failed to allocate buffer: {e}")
                 raise Exception(f"Failed to allocate buffer: {e}")
             
-            # Genera handle
+            # Genera handle locale
             handle = self._generate_handle("buffer")
             
             # Salva riferimenti
-            self._buffers[handle] = buffer
             self._resources[handle] = ManagedResource(
                 handle=handle,
                 tenant_id=tenant_id,
@@ -474,9 +360,10 @@ class PYNQResourceManager:
                     "shape": np_shape,
                     "dtype": str(np_dtype),
                     "size": size,
-                    "physical_address": physical_address
+                    "physical_address": physical_address,
+                    "hw_handle": hw_handle
                 },
-                pynq_object=buffer
+                pynq_object=None
             )
             
             # Aggiorna contatori tenant
@@ -489,13 +376,13 @@ class PYNQResourceManager:
                 'handle': handle,
                 'physical_address': physical_address,
                 'total_size': size,
-                'shm_name': None,  # PYNQ non usa shared memory
+                'shm_name': None,
                 'shape': np_shape,
                 'dtype': str(np_dtype)
             }
-
+    
     def read_buffer(self, tenant_id: str, handle: str, offset: int, length: int) -> bytes:
-        """Leggi dati da buffer PYNQ"""
+        """Leggi dati da buffer usando il thread hardware"""
         with self._lock:
             # Verifica ownership
             if handle not in self._resources:
@@ -504,11 +391,6 @@ class PYNQResourceManager:
             resource = self._resources[handle]
             if resource.tenant_id != tenant_id:
                 raise Exception("Buffer not owned by tenant")
-            
-            # Ottieni buffer PYNQ
-            buffer = self._buffers.get(handle)
-            if buffer is None:
-                raise Exception("Buffer object not found")
             
             # Verifica limiti
             buffer_size = resource.metadata['size']
@@ -518,14 +400,22 @@ class PYNQResourceManager:
             if offset + length > buffer_size:
                 raise Exception(f"Read would exceed buffer bounds")
             
-            # Leggi dati
-            data_bytes = buffer.tobytes()[offset:offset+length]
+            # Ottieni handle hardware
+            hw_handle = resource.metadata.get('hw_handle')
+            if not hw_handle:
+                raise Exception("Hardware handle not found")
             
-            logger.debug(f"[PYNQ] Buffer read: handle={handle}, offset={offset}, length={length}")
-            return data_bytes
-
+            # IMPORTANTE: Leggi nel thread hardware
+            try:
+                data = self.hw_manager.read_buffer(tenant_id, hw_handle, offset, length)
+                logger.debug(f"[PYNQ] Buffer read: handle={handle}, offset={offset}, length={length}")
+                return data
+            except Exception as e:
+                logger.error(f"[PYNQ] Buffer read failed: {e}")
+                raise
+    
     def write_buffer(self, tenant_id: str, handle: str, data: bytes, offset: int):
-        """Scrivi dati in buffer PYNQ"""
+        """Scrivi dati in buffer usando il thread hardware"""
         with self._lock:
             # Verifica ownership
             if handle not in self._resources:
@@ -534,11 +424,6 @@ class PYNQResourceManager:
             resource = self._resources[handle]
             if resource.tenant_id != tenant_id:
                 raise Exception("Buffer not owned by tenant")
-            
-            # Ottieni buffer PYNQ
-            buffer = self._buffers.get(handle)
-            if buffer is None:
-                raise Exception("Buffer object not found")
             
             # Verifica limiti
             buffer_size = resource.metadata['size']
@@ -550,24 +435,21 @@ class PYNQResourceManager:
             if offset + data_length > buffer_size:
                 raise Exception(f"Write would exceed buffer bounds")
             
-            # Scrivi dati nel buffer
-            dtype = np.dtype(resource.metadata['dtype'])
-            temp_array = np.frombuffer(data, dtype=dtype)
+            # Ottieni handle hardware
+            hw_handle = resource.metadata.get('hw_handle')
+            if not hw_handle:
+                raise Exception("Hardware handle not found")
             
-            # Calcola indici per il buffer
-            start_idx = offset // dtype.itemsize
-            end_idx = start_idx + len(temp_array)
-            
-            # Scrivi nel buffer PYNQ
-            buffer.flat[start_idx:end_idx] = temp_array
-            
-            # Assicura che i dati siano sincronizzati con la memoria fisica
-            buffer.flush()
-            
-            logger.debug(f"[PYNQ] Buffer write: handle={handle}, offset={offset}, length={data_length}")
-
+            # IMPORTANTE: Scrivi nel thread hardware
+            try:
+                self.hw_manager.write_buffer(tenant_id, hw_handle, data, offset)
+                logger.debug(f"[PYNQ] Buffer write: handle={handle}, offset={offset}, length={data_length}")
+            except Exception as e:
+                logger.error(f"[PYNQ] Buffer write failed: {e}")
+                raise
+    
     def free_buffer(self, tenant_id: str, handle: str):
-        """Libera un buffer PYNQ"""
+        """Libera un buffer"""
         with self._lock:
             # Verifica ownership
             if handle not in self._resources:
@@ -577,23 +459,28 @@ class PYNQResourceManager:
             if resource.tenant_id != tenant_id:
                 raise Exception("Buffer not owned by tenant")
             
-            # Ottieni buffer
-            buffer = self._buffers.get(handle)
-            if buffer:
-                size = resource.metadata['size']
-                
-                # Aggiorna contatori tenant
-                self.tenant_manager.resources[tenant_id].buffer_handles.discard(handle)
-                self.tenant_manager.resources[tenant_id].total_memory_bytes -= size
-                
-                # Rimuovi riferimenti
-                del self._buffers[handle]
-                del self._resources[handle]
-                
-                logger.info(f"[PYNQ] Buffer freed: handle={handle}, size={size} bytes")
+            # Ottieni info
+            size = resource.metadata['size']
+            hw_handle = resource.metadata.get('hw_handle')
+            
+            if hw_handle:
+                try:
+                    # Libera nel thread hardware
+                    self.hw_manager.free_buffer(tenant_id, hw_handle)
+                except Exception as e:
+                    logger.error(f"[PYNQ] Error freeing buffer: {e}")
+            
+            # Aggiorna contatori tenant
+            self.tenant_manager.resources[tenant_id].buffer_handles.discard(handle)
+            self.tenant_manager.resources[tenant_id].total_memory_bytes -= size
+            
+            # Rimuovi riferimenti
+            del self._resources[handle]
+            
+            logger.info(f"[PYNQ] Buffer freed: handle={handle}, size={size} bytes")
     
     def create_dma(self, tenant_id: str, dma_name: str) -> Tuple[str, Dict]:
-        """Crea DMA handle per un DMA nella PR zone del tenant"""
+        """Crea DMA handle"""
         with self._lock:
             # Verifica che il tenant abbia almeno una PR zone allocata
             tenant_zones = self.pr_zone_manager.get_tenant_zones(tenant_id)
@@ -601,7 +488,6 @@ class PYNQResourceManager:
                 raise Exception(f"Tenant {tenant_id} has no PR zones allocated")
             
             # Per ora assumiamo che il DMA sia nella prima zona del tenant
-            # In un design reale, dovresti mappare i DMA alle zone specifiche
             zone_id = list(tenant_zones)[0]
             
             logger.info(f"[PYNQ] Creating DMA {dma_name} for tenant {tenant_id} in zone {zone_id}")
@@ -635,7 +521,7 @@ class PYNQResourceManager:
             return handle, dma_info
     
     def unload_overlay(self, tenant_id: str, handle: str):
-        """Scarica overlay parziale e libera la PR zone"""
+        """Scarica overlay e libera la PR zone"""
         with self._lock:
             # Verifica ownership
             if handle not in self._resources:
@@ -647,14 +533,6 @@ class PYNQResourceManager:
             
             # Ottieni zona PR dal metadata
             zone_id = resource.metadata.get('pr_zone')
-            
-            if zone_id is not None:
-                # Per sicurezza, decouple la zona prima di rilasciarla
-                try:
-                    self.dfx_manager.decouple_zone(zone_id)
-                    time.sleep(0.1)
-                except Exception as e:
-                    logger.warning(f"[PYNQ] Error decoupling zone {zone_id}: {e}")
             
             # Rilascia la PR zone
             released_zone = self.pr_zone_manager.release_zone_by_handle(handle)
@@ -678,61 +556,47 @@ class PYNQResourceManager:
                 'total_memory': 0,
                 'pr_zones': []
             }
-        
-        # Conta risorse
-        for handle, resource in self._resources.items():
-            if resource.tenant_id == tenant_id:
-                if resource.resource_type == "overlay":
-                    resources['overlays'] += 1
-                elif resource.resource_type == "mmio":
-                    resources['mmios'] += 1
-                elif resource.resource_type == "buffer":
-                    resources['buffers'] += 1
-                    resources['total_memory'] += resource.metadata.get('size', 0)
-                elif resource.resource_type == "dma":
-                    resources['dmas'] += 1
-        
-        # Aggiungi info PR zones - converti in lista se necessario
-        tenant_zones = self.pr_zone_manager.get_tenant_zones(tenant_id)
-        if isinstance(tenant_zones, set):
-            resources['pr_zones'] = list(tenant_zones)
-        else:
-            resources['pr_zones'] = tenant_zones
-        
-        return resources
-
+            
+            # Conta risorse
+            for handle, resource in self._resources.items():
+                if resource.tenant_id == tenant_id:
+                    if resource.resource_type == "overlay":
+                        resources['overlays'] += 1
+                    elif resource.resource_type == "mmio":
+                        resources['mmios'] += 1
+                    elif resource.resource_type == "buffer":
+                        resources['buffers'] += 1
+                        resources['total_memory'] += resource.metadata.get('size', 0)
+                    elif resource.resource_type == "dma":
+                        resources['dmas'] += 1
+            
+            # Aggiungi info PR zones
+            resources['pr_zones'] = list(self.pr_zone_manager.get_tenant_zones(tenant_id))
+            
+            return resources
+    
     def get_pr_zone_status(self) -> Dict:
-        """Ottieni stato delle PR zones incluso stato DFX"""
+        """Ottieni stato delle PR zones"""
         base_info = self.pr_zone_manager.get_allocation_info()
         
-        # Aggiungi stato DFX
+        # Aggiungi indirizzi per ogni zona
         for zone_id in range(self.pr_zone_manager.num_pr_zones):
             zone_key = f'PR_{zone_id}'
-            if zone_key in base_info['allocations']:
-                base_info['allocations'][zone_key]['decoupled'] = \
-                    self.dfx_manager.is_decoupled(zone_id)
+            if zone_key not in base_info['allocations']:
+                base_info['allocations'][zone_key] = {}
             
-            # Aggiungi indirizzi della zona
-            base_info['allocations'][zone_key] = base_info['allocations'].get(zone_key, {})
             base_info['allocations'][zone_key]['addresses'] = \
                 self.pr_zone_addresses.get(zone_id, [])
         
         return base_info
-
+    
     def cleanup_tenant_resources(self, tenant_id: str):
-        """Pulisce tutte le risorse di un tenant incluse le PR zones"""
+        """Pulisce tutte le risorse di un tenant"""
         with self._lock:
             # Prima rilascia tutte le PR zones del tenant
             released_zones = self.pr_zone_manager.release_all_tenant_zones(tenant_id)
             if released_zones:
                 logger.info(f"[PYNQ] Released PR zones {released_zones} for tenant {tenant_id}")
-                
-                # Decouple le zone rilasciate per sicurezza
-                for zone_id in released_zones:
-                    try:
-                        self.dfx_manager.decouple_zone(zone_id)
-                    except Exception as e:
-                        logger.warning(f"[PYNQ] Error decoupling zone {zone_id}: {e}")
             
             # Trova tutte le risorse del tenant
             handles_to_remove = []
@@ -745,9 +609,9 @@ class PYNQResourceManager:
                 self._cleanup_resource(handle)
             
             logger.info(f"[PYNQ] Cleaned up all resources for tenant {tenant_id}")
-
+    
     def _cleanup_resource(self, handle: str):
-        """Pulisce una singola risorsa su hardware PYNQ"""
+        """Pulisce una singola risorsa"""
         if handle not in self._resources:
             return
             
@@ -755,62 +619,48 @@ class PYNQResourceManager:
         
         try:
             if resource.resource_type == "overlay":
-                # Overlay/bitstream parziali - già gestiti sopra
+                # Overlay/bitstream parziali
                 logger.info(f"[PYNQ] Cleaned overlay: {handle}")
                 
             elif resource.resource_type == "mmio":
-                # MMIO viene pulito automaticamente
-                if handle in self._mmios:
-                    del self._mmios[handle]
+                # Distruggi MMIO nel thread hardware
+                hw_handle = resource.metadata.get('hw_handle')
+                if hw_handle:
+                    try:
+                        self.hw_manager.destroy_mmio(resource.tenant_id, hw_handle)
+                    except:
+                        pass
                 logger.info(f"[PYNQ] Cleaned MMIO: {handle}")
                 
             elif resource.resource_type == "buffer":
-                # Buffer PYNQ
-                buffer = self._buffers.get(handle)
-                if buffer is not None:  # FIX: usa 'is not None' invece di 'if buffer'
+                # Libera buffer nel thread hardware
+                hw_handle = resource.metadata.get('hw_handle')
+                if hw_handle:
                     try:
-                        # PYNQ buffers non hanno sempre freebuffer, dipende dalla versione
-                        if hasattr(buffer, 'freebuffer') and callable(buffer.freebuffer):
-                            buffer.freebuffer()
-                        elif hasattr(buffer, 'close') and callable(buffer.close):
-                            buffer.close()
-                        # Se nessuno dei due metodi esiste, il buffer verrà rilasciato dal GC
-                    except Exception as e:
-                        logger.warning(f"[PYNQ] Error freeing buffer {handle}: {e}")
-                    
-                    # Aggiorna contatori tenant
-                    size = resource.metadata.get('size', 0)
-                    tenant_resources = self.tenant_manager.resources.get(resource.tenant_id)
-                    if tenant_resources:
-                        tenant_resources.buffer_handles.discard(handle)
-                        tenant_resources.total_memory_bytes -= size
-                    
-                    # Rimuovi riferimento
-                    if handle in self._buffers:
-                        del self._buffers[handle]
-                    logger.info(f"[PYNQ] Cleaned buffer: {handle}")
-                    
+                        self.hw_manager.free_buffer(resource.tenant_id, hw_handle)
+                    except:
+                        pass
+                
+                # Aggiorna contatori
+                size = resource.metadata.get('size', 0)
+                self.tenant_manager.resources[resource.tenant_id].buffer_handles.discard(handle)
+                self.tenant_manager.resources[resource.tenant_id].total_memory_bytes -= size
+                
+                logger.info(f"[PYNQ] Cleaned buffer: {handle}")
+                
             elif resource.resource_type == "dma":
-                # DMA viene pulito automaticamente
-                if handle in self._dmas:
-                    del self._dmas[handle]
                 logger.info(f"[PYNQ] Cleaned DMA: {handle}")
             
             # Rimuovi dai registri del tenant manager
-            tenant_resources = self.tenant_manager.resources.get(resource.tenant_id)
-            if tenant_resources:
-                if resource.resource_type == "overlay":
-                    tenant_resources.overlays.discard(handle)
-                elif resource.resource_type == "mmio":
-                    tenant_resources.mmio_handles.discard(handle)
-                elif resource.resource_type == "dma":
-                    tenant_resources.dma_handles.discard(handle)
-                # buffer_handles già gestito sopra
+            if resource.resource_type == "overlay":
+                self.tenant_manager.resources[resource.tenant_id].overlays.discard(handle)
+            elif resource.resource_type == "mmio":
+                self.tenant_manager.resources[resource.tenant_id].mmio_handles.discard(handle)
+            elif resource.resource_type == "dma":
+                self.tenant_manager.resources[resource.tenant_id].dma_handles.discard(handle)
             
         except Exception as e:
             logger.error(f"[PYNQ] Error cleaning up {resource.resource_type} {handle}: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
         
         # Rimuovi dai registri
         del self._resources[handle]

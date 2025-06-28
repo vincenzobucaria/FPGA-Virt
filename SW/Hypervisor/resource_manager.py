@@ -45,8 +45,9 @@ class ResourceManager:
             if not os.path.exists(full_path):
                 raise Exception(f"Bitstream not found: {bitfile_path}")
                 
-            overlay = pynq.Overlay(full_path)
-            
+            print("         LOADING OVERLAY:", full_path)
+            overlay = Bitstream(full_path, None, True)
+            overlay.download()
             # Genera handle
             handle = self._generate_handle("overlay")
             
@@ -78,7 +79,7 @@ class ResourceManager:
                         'address_range': addr_range,
                         'parameters': ip.get('parameters', {})
                     }
-            
+            print("""IP CORES IN THE BITSTREAM:""", ip_cores)
             return handle, ip_cores
     
     def create_mmio(self, tenant_id: str, overlay_id: str, ip_name: str,

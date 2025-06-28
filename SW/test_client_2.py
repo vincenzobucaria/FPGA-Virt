@@ -6,20 +6,20 @@ import sys
 import time
 import numpy as np
 # Setup
-os.environ['TENANT_ID'] = 'tenant1'
-os.environ['PYNQ_API_KEY'] = 'test_key_1'
+os.environ['TENANT_ID'] = 'tenant2'
+os.environ['PYNQ_API_KEY'] = 'test_key_2'
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from client.pynq_proxy import Overlay, allocate, MMIO
 
 
 print("=== Simple Register Map vs MMIO Test ===\n")
-    
+
 # 1. Load overlay
 print("1. Loading overlay...")
 overlay = Overlay('sub')
 print("✅ Overlay loaded\n")
-
+    
 
     
     # Ottieni informazioni usando mmio
@@ -28,7 +28,7 @@ size = 10
 
 in_buf  = allocate(shape=(size,), dtype=np.int32)
 out_buf = allocate(shape=(size,), dtype=np.int32)
-PR_0_base_addr = 0xA0000000
+PR_0_base_addr = 0xB0000000
 MMIO_PR_0 = MMIO(PR_0_base_addr, 0x10000)
 in_buf[:] = np.arange(size)
 in_buf.sync_to_device()
@@ -51,7 +51,7 @@ MMIO_PR_0.write(0x20, (out_buf.physical_address >> 32) & 0xFFFFFFFF)
 print(f"OUTPUT_PTR: 0x{MMIO_PR_0.read(0x1C):08X} 0x{MMIO_PR_0.read(0x20):08X}")
 
 # Scalar
-scalar_val = 10
+scalar_val = 20
 MMIO_PR_0.write(0x28, scalar_val)
 print(f"SCALAR: {MMIO_PR_0.read(0x28)}")
 
