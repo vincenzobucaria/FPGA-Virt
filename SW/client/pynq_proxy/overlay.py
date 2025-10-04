@@ -69,8 +69,8 @@ class RegisterMap:
 class IPCore(MMIO):
     """IP Core wrapper che estende MMIO con register_map - compatibile PYNQ"""
     
-    def __init__(self, base_addr, length, ip_name=None, overlay_id=None, registers=None):
-        super().__init__(base_addr, length)
+    def __init__(self, base_addr, length, ip_name=None, overlay_id=None, registers=None, uio_device=None):
+        super().__init__(base_addr, length, uio_device=uio_device)
         self._ip_name = ip_name
         self._overlay_id = overlay_id
         
@@ -114,6 +114,19 @@ class Overlay:
             raise Exception(f"Failed to load overlay: {response.error}")
             
         self._overlay_id = response.overlay_id
+        
+        # NUOVO: Estrai uio_device dalla risposta
+        self._uio_device = response.uio_device if response.HasField('uio_device') else None
+        if self._uio_device:
+            logger.info(f"UIO device assigned: {self._uio_device}")
+        else:
+            logger.warning("No UIO device provided by server - MMIO access will fail")
+        
+        # Estrai pr_zone_id se presente
+        self._pr_zone_id = response.pr_zone_id if response.HasField('pr_zone_id') else None
+        if self._pr_zone_id is not None:
+            logger.info(f"PR zone allocated: {self._pr_zone_id}")
+        
         self._ip_dict = self._parse_ip_dict(response.ip_cores)
         
         # Crea attributi per ogni IP
@@ -157,7 +170,8 @@ class Overlay:
                 length=ip_info['addr_range'],
                 ip_name=name,
                 overlay_id=self._overlay_id,
-                registers=ip_info.get('registers')
+                registers=ip_info.get('registers'),
+                uio_device=self._uio_device  # NUOVO: Passa il device UIO
             )
             
             setattr(self, name, ip_core)
@@ -175,9 +189,23 @@ class Overlay:
         """Ritorna nome del bitfile"""
         return self._bitfile_name
     
+    @property
+    def uio_device(self):
+        """Ritorna il path del device UIO assegnato"""
+        return self._uio_device
+    
+    @property
+    def pr_zone_id(self):
+        """Ritorna l'ID della PR zone allocata"""
+        return self._pr_zone_id
+    
     def __repr__(self):
         """Mostra info overlay"""
         output = f"Overlay: {self._bitfile_name}\n"
+        if self._uio_device:
+            output += f"UIO Device: {self._uio_device}\n"
+        if self._pr_zone_id is not None:
+            output += f"PR Zone: {self._pr_zone_id}\n"
         output += f"IP Cores:\n"
         for name in sorted(self._ip_dict.keys()):
             ip_info = self._ip_dict[name]
