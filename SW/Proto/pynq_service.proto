@@ -91,7 +91,8 @@ message LoadOverlayRequest {
 message LoadOverlayResponse {
     string overlay_id = 1;
     map<string, IPCore> ip_cores = 2;
-    string error = 3;
+    string uio_device = 3;        // NUOVO: path del device UIO (es. "/dev/uio0")
+    int32 pr_zone_id = 4;         // NUOVO: ID della zona PR allocata
 }
 
 // Modifica IPCore per includere registri
@@ -176,6 +177,8 @@ message AllocateBufferResponse {
     int64 size = 4;
     optional string shm_name = 5;         // Nome shared memory se disponibile
     optional uint64 physical_address = 6;  // Per compatibilità DMA futura
+    optional uint64 vm_offset = 7;         // NUOVO: offset per mmap sul char device
+    optional string char_device_path = 8;  // NUOVO: path del char device (es. "/dev/pynq_mem_tenant1")
 }
 
 message ReadBufferRequest {
