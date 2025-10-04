@@ -1,4 +1,3 @@
-# hypervisor/pynq_resource_manager.py - Complete version with PR zones and DFX support
 import os
 import threading
 import uuid
@@ -69,6 +68,18 @@ class PYNQResourceManager:
         self.pr_zone_addresses = {}
         self._initialize_pr_zone_addresses()
         
+        
+        #Gestione char device
+        
+        self._char_devices: Dict[str, str] = {}  # tenant_id -> device_path
+        self._buffer_offsets: Dict[str, int] = {}  # tenant_id -> next_offset
+        self._buffer_to_offset: Dict[str, int] = {}  # buffer_handle -> vm_offset
+        
+       
+        self._verify_char_device_support()
+        
+        logger.info(f"[PYNQ] Initialized Resource Manager with char device support")
+        
         # Crea event loop per PYNQ se non esiste
         try:
             self._loop = asyncio.get_event_loop()
@@ -110,22 +121,35 @@ class PYNQResourceManager:
             raise RuntimeError(f"Cannot initialize without static overlay: {e}")
     
     def _initialize_dfx_decouplers(self):
-        """Inizializza i DFX decouplers dalla configurazione"""
+        """Inizializza i DFX decouplers GPIO dalla configurazione"""
         if not self.config_manager:
-            # Default configuration
-            self.dfx_manager.register_decoupler(0, "axi_gpio_0")
-            self.dfx_manager.register_decoupler(1, "axi_gpio_1")
+            # Default configuration per 2 zone
+            self.dfx_manager.register_decoupler(0, gpio_pin=0)  # PR Zone 0 usa GPIO 0
+            self.dfx_manager.register_decoupler(1, gpio_pin=1)  # PR Zone 1 usa GPIO 1
+            logger.warning("[PYNQ] Registered DEFAULT GPIO decouplers (zones 0-1)")
             return
         
         # Leggi configurazione PR zones
-        pr_zones_config = getattr(self.config_manager, 'pr_zones', [])
+        if hasattr(self.config_manager, 'global_config') and 'pr_zones' in self.config_manager.global_config:
+            pr_zones_config = self.config_manager.global_config['pr_zones']
+        else:
+            pr_zones_config = getattr(self.config_manager, 'pr_zones', [])
+        
         for zone_config in pr_zones_config:
-            zone_id = zone_config.zone_id if hasattr(zone_config, 'zone_id') else zone_config.get('zone_id')
-            dfx_decoupler = zone_config.dfx_decoupler if hasattr(zone_config, 'dfx_decoupler') else zone_config.get('dfx_decoupler')
+            zone_id = zone_config.get('zone_id') if isinstance(zone_config, dict) else zone_config.zone_id
             
-            if zone_id is not None and dfx_decoupler:
-                self.dfx_manager.register_decoupler(zone_id, dfx_decoupler)
-                logger.info(f"[PYNQ] Registered DFX decoupler {dfx_decoupler} for zone {zone_id}")
+            # Cerca gpio_pin nella config, altrimenti usa zone_id
+            gpio_pin = None
+            if isinstance(zone_config, dict):
+                gpio_pin = zone_config.get('gpio_pin', zone_id)
+            elif hasattr(zone_config, 'gpio_pin'):
+                gpio_pin = zone_config.gpio_pin
+            else:
+                gpio_pin = zone_id
+            
+            if zone_id is not None:
+                self.dfx_manager.register_decoupler(zone_id, gpio_pin=gpio_pin)
+                logger.info(f"[PYNQ] Registered GPIO decoupler for zone {zone_id} on pin {gpio_pin}")
         
         # Assicurati che tutte le zone siano accoppiate all'avvio
         self.dfx_manager.ensure_all_coupled()
@@ -168,27 +192,17 @@ class PYNQResourceManager:
     def load_overlay(self, tenant_id: str, bitfile_path: str) -> Tuple[str, Dict]:
         """
         Carica overlay parziale con gestione DFX e PR zones.
-        
-        Args:
-            tenant_id: ID del tenant
-            bitfile_path: Path del bitstream richiesto
-            
-        Returns:
-            Tuple di (overlay_handle, ip_cores_dict)
         """
         with self._lock:
-            # Verifica permessi base
             if not self.tenant_manager.can_allocate_overlay(tenant_id):
                 raise Exception("Overlay limit reached")
             
-            # Ottieni config del tenant
             tenant_config = self.tenant_manager.config.get(tenant_id)
             if not tenant_config:
                 raise Exception(f"Tenant {tenant_id} not found")
             
             allowed_bitstreams = tenant_config.allowed_bitstreams or set()
             
-            # Usa PR Zone Manager per trovare la zona migliore
             result = self.pr_zone_manager.find_best_zone_for_bitstream(
                 bitfile_path,
                 tenant_id,
@@ -201,29 +215,34 @@ class PYNQResourceManager:
             
             zone_id, actual_bitstream_path = result
             
-            # Verifica che il tenant possa usare questa zona
             if hasattr(tenant_config, 'allowed_pr_zones'):
                 if zone_id not in tenant_config.allowed_pr_zones:
                     raise Exception(f"Tenant {tenant_id} not allowed to use PR zone {zone_id}")
             
             logger.info(f"[PYNQ] Loading partial bitstream {actual_bitstream_path} "
-                       f"in PR zone {zone_id} for tenant {tenant_id}")
+                    f"in PR zone {zone_id} for tenant {tenant_id}")
             
-            # Esegui riconfigurazione parziale con DFX
             success = self.dfx_manager.reconfigure_pr_zone(zone_id, actual_bitstream_path)
             if not success:
                 raise Exception(f"Failed to reconfigure PR zone {zone_id}")
             
-            # Genera handle
             handle = self._generate_handle("overlay")
             
-            # Alloca la zona PR
             if not self.pr_zone_manager.allocate_zone(
                 tenant_id, zone_id, actual_bitstream_path, handle
             ):
                 raise Exception(f"Failed to allocate PR zone {zone_id}")
             
-            # Salva riferimenti
+            # NUOVO: Imposta permessi sul device UIO
+            uio_device = f"/dev/uio{zone_id}"
+            if os.path.exists(uio_device):
+                try:
+                    os.chmod(uio_device, 0o660)
+                    os.chown(uio_device, tenant_config.uid, tenant_config.gid)
+                    logger.info(f"Set permissions on {uio_device} for tenant {tenant_id}")
+                except Exception as e:
+                    logger.warning(f"Could not set permissions on {uio_device}: {e}")
+            
             self._resources[handle] = ManagedResource(
                 handle=handle,
                 tenant_id=tenant_id,
@@ -233,19 +252,21 @@ class PYNQResourceManager:
                     "bitfile": actual_bitstream_path,
                     "pr_zone": zone_id,
                     "requested_bitfile": bitfile_path,
-                    "partial": True
+                    "partial": True,
+                    "uio_device": uio_device  # NUOVO: salva path UIO
                 },
-                pynq_object=None  # Bitstream parziali non hanno overlay object
+                pynq_object=None
             )
             
-            # Registra con tenant manager
             self.tenant_manager.resources[tenant_id].overlays.add(handle)
             
-            # Per bitstream parziali, gli IP cores sono definiti dalla zona PR
             ip_cores = self._get_pr_zone_ip_cores(zone_id)
+            # NUOVO: Aggiungi info zona ai metadata degli IP cores
+            ip_cores['_zone_id'] = zone_id
+            ip_cores['_uio_device'] = uio_device
             
             logger.info(f"[PYNQ] Partial bitstream loaded successfully: {handle} "
-                       f"in PR zone {zone_id} with {len(ip_cores)} accessible IPs")
+                    f"in PR zone {zone_id} with {len(ip_cores)-2} accessible IPs")  # -2 per i metadata
             
             return handle, ip_cores
     
@@ -440,7 +461,7 @@ class PYNQResourceManager:
             logger.debug(f"[PYNQ] MMIO write by {tenant_id}: handle={handle}, offset=0x{offset:04x}, value=0x{value:08x}")
     
     def allocate_buffer(self, tenant_id: str, shape, dtype='uint8') -> Dict:
-        """Alloca buffer su hardware PYNQ reale"""
+        """Alloca buffer su hardware PYNQ reale E registra nel char device"""
         with self._lock:
             # Calcola size
             np_shape = tuple(shape) if isinstance(shape, (list, tuple)) else (shape,)
@@ -463,6 +484,16 @@ class PYNQResourceManager:
             # Genera handle
             handle = self._generate_handle("buffer")
             
+            # NUOVO: Registra nel char device se disponibile
+            vm_offset = None
+            if self._char_device_enabled and tenant_id in self._char_devices:
+                vm_offset = self._register_buffer_in_char_device(
+                    tenant_id, 
+                    handle,
+                    physical_address,
+                    buffer.nbytes
+                )
+            
             # Salva riferimenti
             self._buffers[handle] = buffer
             self._resources[handle] = ManagedResource(
@@ -474,7 +505,8 @@ class PYNQResourceManager:
                     "shape": np_shape,
                     "dtype": str(np_dtype),
                     "size": size,
-                    "physical_address": physical_address
+                    "physical_address": physical_address,
+                    "vm_offset": vm_offset  # NUOVO: offset nel char device
                 },
                 pynq_object=buffer
             )
@@ -483,17 +515,54 @@ class PYNQResourceManager:
             self.tenant_manager.resources[tenant_id].buffer_handles.add(handle)
             self.tenant_manager.resources[tenant_id].total_memory_bytes += size
             
-            logger.info(f"[PYNQ] Buffer allocated: {handle}, phys_addr=0x{physical_address:08x}, size={size} bytes")
+            logger.info(f"[PYNQ] Buffer allocated: {handle}, phys=0x{physical_address:08x}, "
+                       f"size={size}, vm_offset=0x{vm_offset:x if vm_offset else 0}")
             
             return {
                 'handle': handle,
                 'physical_address': physical_address,
                 'total_size': size,
-                'shm_name': None,  # PYNQ non usa shared memory
+                'shm_name': None,
                 'shape': np_shape,
-                'dtype': str(np_dtype)
+                'dtype': str(np_dtype),
+                'vm_offset': vm_offset,  # NUOVO: per il container
+                'char_device': self._char_devices.get(tenant_id)  # NUOVO: path del device
             }
+    
+    def _register_buffer_in_char_device(self, tenant_id: str, buffer_id: str, 
+                                       phys_addr: int, size: int) -> int:
 
+        
+        if tenant_id not in self._buffer_offsets:
+            self._buffer_offsets[tenant_id] = 0
+        
+        vm_offset = self._buffer_offsets[tenant_id]
+        
+
+        sysfs_path = f"/sys/devices/virtual/pynq_char/pynq_mem_{tenant_id}/add_buffer"
+        
+        command = f"{vm_offset:x},{phys_addr:x},{size:x},{buffer_id}"
+        
+        try:
+            with open(sysfs_path, 'w') as f:
+                f.write(command + '\n')
+        except Exception as e:
+            logger.error(f"[CHAR_DEV] Failed to register buffer: {e}")
+            raise
+        
+        # Salva mapping
+        self._buffer_to_offset[buffer_id] = vm_offset
+        
+        # Incrementa offset (allineato a pagina)
+        PAGE_SIZE = 4096
+        self._buffer_offsets[tenant_id] += ((size + PAGE_SIZE - 1) // PAGE_SIZE) * PAGE_SIZE
+        
+        logger.info(f"[CHAR_DEV] Registered buffer {buffer_id} at offset 0x{vm_offset:x}")
+        
+        return vm_offset
+    
+    
+    
     def read_buffer(self, tenant_id: str, handle: str, offset: int, length: int) -> bytes:
         """Leggi dati da buffer PYNQ"""
         with self._lock:
@@ -567,7 +636,7 @@ class PYNQResourceManager:
             logger.debug(f"[PYNQ] Buffer write: handle={handle}, offset={offset}, length={data_length}")
 
     def free_buffer(self, tenant_id: str, handle: str):
-        """Libera un buffer PYNQ"""
+        """Libera un buffer PYNQ e rimuovi dal char device"""
         with self._lock:
             # Verifica ownership
             if handle not in self._resources:
@@ -582,15 +651,33 @@ class PYNQResourceManager:
             if buffer:
                 size = resource.metadata['size']
                 
+                # NUOVO: Rimuovi dal char device
+                if self._char_device_enabled and handle in self._buffer_to_offset:
+                    vm_offset = self._buffer_to_offset[handle]
+                    sysfs_remove = f"/sys/devices/virtual/pynq_char/pynq_mem_{tenant_id}/remove_buffer"
+                    
+                    try:
+                        with open(sysfs_remove, 'w') as f:
+                            f.write(f"{vm_offset:x}\n")
+                        
+                        del self._buffer_to_offset[handle]
+                        logger.info(f"[CHAR_DEV] Removed buffer {handle} from char device")
+                    except:
+                        logger.warning(f"[CHAR_DEV] Could not remove buffer from char device")
+                
                 # Aggiorna contatori tenant
                 self.tenant_manager.resources[tenant_id].buffer_handles.discard(handle)
                 self.tenant_manager.resources[tenant_id].total_memory_bytes -= size
+                
+                # Libera buffer PYNQ
+                if hasattr(buffer, 'freebuffer'):
+                    buffer.freebuffer()
                 
                 # Rimuovi riferimenti
                 del self._buffers[handle]
                 del self._resources[handle]
                 
-                logger.info(f"[PYNQ] Buffer freed: handle={handle}, size={size} bytes")
+                logger.info(f"[PYNQ] Buffer freed: {handle}, size={size} bytes")
     
     def create_dma(self, tenant_id: str, dma_name: str) -> Tuple[str, Dict]:
         """Crea DMA handle per un DMA nella PR zone del tenant"""
@@ -814,3 +901,61 @@ class PYNQResourceManager:
         
         # Rimuovi dai registri
         del self._resources[handle]
+        
+        
+    def _verify_char_device_support(self):
+        """Verifica che il kernel module pynq_char_mapper sia caricato"""
+        if not os.path.exists('/sys/class/pynq_char/create_device'):
+            logger.warning("[CHAR_DEV] Kernel module not loaded - char device support disabled")
+            logger.warning("[CHAR_DEV] Load with: sudo insmod pynq_char_mapper.ko")
+            self._char_device_enabled = False
+        else:
+            self._char_device_enabled = True
+            logger.info("[CHAR_DEV] Kernel module detected - char device support enabled")
+    
+    def create_tenant_char_device(self, tenant_id: str) -> str:
+        """
+        Crea char device per un tenant (chiamato al setup iniziale).
+        
+        Returns:
+            Path del device creato (es. /dev/pynq_mem_tenant1)
+        """
+        if not self._char_device_enabled:
+            raise Exception("Char device support not available - kernel module not loaded")
+        
+        with self._lock:
+            # Se già esiste, ritorna quello
+            if tenant_id in self._char_devices:
+                return self._char_devices[tenant_id]
+            
+            # Crea device tramite sysfs
+            try:
+                with open('/sys/class/pynq_char/create_device', 'w') as f:
+                    f.write(f"{tenant_id}\n")
+                
+                time.sleep(0.2)  # Attendi creazione
+                
+                device_path = f"/dev/pynq_mem_{tenant_id}"
+                
+                if not os.path.exists(device_path):
+                    raise Exception(f"Device {device_path} not created")
+                
+                # Cambia permessi
+                tenant_config = self.config_manager.tenants.get(tenant_id)
+                if tenant_config:
+                    os.chmod(device_path, 0o660)
+                    try:
+                        os.chown(device_path, tenant_config.uid, tenant_config.gid)
+                    except:
+                        logger.warning(f"Could not chown {device_path}")
+                
+                # Salva riferimenti
+                self._char_devices[tenant_id] = device_path
+                self._buffer_offsets[tenant_id] = 0
+                
+                logger.info(f"[CHAR_DEV] Created device {device_path} for tenant {tenant_id}")
+                return device_path
+                
+            except Exception as e:
+                logger.error(f"[CHAR_DEV] Failed to create device for {tenant_id}: {e}")
+                raise

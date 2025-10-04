@@ -1,0 +1,63 @@
+# config.yaml - Configurazione con indirizzi associati alle PR zones
+
+# Configurazione globale
+global:
+  num_pr_zones: 2
+  bitstream_dir: /home/xilinx/bitstreams
+  socket_dir: /var/run/pynq
+  # Shell statica che viene caricata all'avvio
+  static_bitstream: /home/xilinx/bitstreams/full.bit
+  
+  # Definizione delle PR zones con i loro indirizzi
+  pr_zones:
+    - zone_id: 0
+      name: PR_0
+      # DFX decoupler per questa zona
+      dfx_decoupler: axi_gpio_0
+      # Indirizzi associati a questa PR zone
+      address_ranges:
+        - [0xA0000000, 0x10000]  # 64KB per IP nella PR_0
+
+    
+    - zone_id: 1
+      name: PR_1
+      dfx_decoupler: axi_gpio_1
+      address_ranges:
+        - [0xB0000000, 0x10000]  # 64KB per IP nella PR_1
+  
+
+# Configurazione tenant
+tenants:
+  - id: tenant1
+    uid: 1001
+    gid: 1001
+    api_key: test_key_1
+    max_overlays: 2
+    max_buffers: 10
+    max_memory_mb: 256
+    # Bitstream permessi per questo tenant
+    allowed_bitstreams:
+      - PR_0_sum.bit
+      - PR_0_sub.bit
+      - PR_1_sum.bit
+      - PR_1_sub.bit
+      - PR_0_mult.bit
+      - PR_1_mult.bit
+      - PR_0_conv2d.bit
+      - PR_1_conv2d.bit
+    # Quali PR zones può usare questo tenant (opzionale, default = tutte)
+    allowed_pr_zones: [0, 1]
+
+  - id: tenant2
+    uid: 1002
+    gid: 1002
+    api_key: test_key_2
+    max_overlays: 1
+    max_buffers: 5
+    max_memory_mb: 128
+    allowed_bitstreams:
+      - PR_0_sub.bit
+      - PR_1_sub.bit
+      - PR_0_sum.bit
+      - PR_1_sum.bit
+    allowed_pr_zones: [0, 1]

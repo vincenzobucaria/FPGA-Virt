@@ -1,60 +1,72 @@
-# hypervisor/dfx_decoupler_manager.py
+# hypervisor/dfx_decoupler_gpio.py
 import time
 import logging
 from typing import Dict, Optional
 from dataclasses import dataclass
+from pynq import GPIO
+from pynq import Bitstream
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class DFXDecouplerConfig:
-    """Configurazione per un DFX decoupler"""
+    """Configurazione per un DFX decoupler GPIO"""
     zone_id: int
-    decoupler_name: str  # es. "axi_gpio_0"
+    gpio_pin: int  # Pin GPIO da usare
     decouple_value: int = 1  # Valore per isolare (1)
     couple_value: int = 0    # Valore per connettere (0)
 
 class DFXDecouplerManager:
-    """Gestisce i DFX decouplers per la riconfigurazione parziale"""
+    """Gestisce i DFX decouplers tramite GPIO per la riconfigurazione parziale"""
     
-    def __init__(self, static_overlay):
+    def __init__(self, static_overlay=None):
         """
         Args:
-            static_overlay: Overlay PYNQ della shell statica (full.bit)
+            static_overlay: Non più necessario con GPIO diretti
         """
-        self.static_overlay = static_overlay
-        self.decouplers: Dict[int, DFXDecouplerConfig] = {}
+        self.decouplers: Dict[int, GPIO] = {}
+        self.decoupler_configs: Dict[int, DFXDecouplerConfig] = {}
         self._decoupler_states: Dict[int, bool] = {}  # True = decoupled, False = coupled
         
-        logger.info("[DFX] Initialized DFX Decoupler Manager")
+        logger.info("[DFX] Initialized DFX Decoupler Manager with GPIO")
     
-    def register_decoupler(self, zone_id: int, decoupler_name: str, **kwargs):
+    def register_decoupler(self, zone_id: int, gpio_pin: int = None, **kwargs):
         """
-        Registra un DFX decoupler per una PR zone.
+        Registra un DFX decoupler GPIO per una PR zone.
         
         Args:
             zone_id: ID della PR zone
-            decoupler_name: Nome del decoupler nell'overlay (es. "axi_gpio_0")
+            gpio_pin: Pin GPIO da usare (se None, usa zone_id come pin number)
             **kwargs: Parametri opzionali per DFXDecouplerConfig
         """
-        # Verifica che il decoupler esista nell'overlay
-        if not hasattr(self.static_overlay, decoupler_name):
-            raise ValueError(f"Decoupler {decoupler_name} not found in static overlay")
+        # Se gpio_pin non specificato, usa zone_id come default
+        if gpio_pin is None:
+            gpio_pin = zone_id
         
-        config = DFXDecouplerConfig(
-            zone_id=zone_id,
-            decoupler_name=decoupler_name,
-            **kwargs
-        )
-        
-        self.decouplers[zone_id] = config
-        self._decoupler_states[zone_id] = False  # Inizialmente coupled
-        
-        # IMPORTANTE: Configura il tristate come output UNA SOLA VOLTA all'inizializzazione
-        decoupler = getattr(self.static_overlay, config.decoupler_name)
-        decoupler.register_map.GPIO_TRI.CH1_TRI = 0  # 0 = output, e resta sempre così
-        
-        logger.info(f"[DFX] Registered decoupler {decoupler_name} for PR zone {zone_id} - tristate set to OUTPUT")
+        try:
+            # Crea configurazione
+            config = DFXDecouplerConfig(
+                zone_id=zone_id,
+                gpio_pin=gpio_pin,
+                **kwargs
+            )
+            
+            # Crea oggetto GPIO
+            gpio_obj = GPIO(GPIO.get_gpio_pin(gpio_pin), 'out')
+            
+            # Salva riferimenti
+            self.decouplers[zone_id] = gpio_obj
+            self.decoupler_configs[zone_id] = config
+            self._decoupler_states[zone_id] = False  # Inizialmente coupled
+            
+            # Assicura che sia coupled all'inizio
+            gpio_obj.write(config.couple_value)
+            
+            logger.info(f"[DFX] Registered GPIO decoupler for PR zone {zone_id} on pin {gpio_pin}")
+            
+        except Exception as e:
+            logger.error(f"[DFX] Failed to register decoupler for zone {zone_id}: {e}")
+            raise
     
     def decouple_zone(self, zone_id: int):
         """
@@ -66,17 +78,13 @@ class DFXDecouplerManager:
         if zone_id not in self.decouplers:
             raise ValueError(f"No decoupler registered for PR zone {zone_id}")
         
-        config = self.decouplers[zone_id]
+        config = self.decoupler_configs[zone_id]
+        gpio_obj = self.decouplers[zone_id]
         
-        # Ottieni il decoupler dall'overlay
-        decoupler = getattr(self.static_overlay, config.decoupler_name)
-        if not decoupler:
-            raise RuntimeError(f"Cannot access decoupler {config.decoupler_name}")
+        logger.info(f"[DFX] Decoupling PR zone {zone_id} using GPIO pin {config.gpio_pin}")
         
-        logger.info(f"[DFX] Decoupling PR zone {zone_id} using {config.decoupler_name}")
-        
-        # Decouple (isola) la PR region usando CH1
-        decoupler.register_map.GPIO_DATA.CH1_DATA = config.decouple_value  # 1
+        # Decouple (isola) la PR region
+        gpio_obj.write(config.decouple_value)  # Scrivi 1
         
         # Piccola pausa per assicurarsi che il decoupling sia completo
         time.sleep(0.1)
@@ -94,17 +102,13 @@ class DFXDecouplerManager:
         if zone_id not in self.decouplers:
             raise ValueError(f"No decoupler registered for PR zone {zone_id}")
         
-        config = self.decouplers[zone_id]
+        config = self.decoupler_configs[zone_id]
+        gpio_obj = self.decouplers[zone_id]
         
-        # Ottieni il decoupler dall'overlay
-        decoupler = getattr(self.static_overlay, config.decoupler_name)
-        if not decoupler:
-            raise RuntimeError(f"Cannot access decoupler {config.decoupler_name}")
+        logger.info(f"[DFX] Coupling PR zone {zone_id} using GPIO pin {config.gpio_pin}")
         
-        logger.info(f"[DFX] Coupling PR zone {zone_id} using {config.decoupler_name}")
-        
-        # Couple (connette) la PR region usando CH1
-        decoupler.register_map.GPIO_DATA.CH1_DATA = config.couple_value  # 0
+        # Couple (connette) la PR region
+        gpio_obj.write(config.couple_value)  # Scrivi 0
         
         # Piccola pausa per stabilizzazione
         time.sleep(0.1)
@@ -122,10 +126,10 @@ class DFXDecouplerManager:
             if self.is_decoupled(zone_id):
                 self.couple_zone(zone_id)
             else:
-                # Anche se lo stato dice che è coupled, forza il valore per sicurezza
-                config = self.decouplers[zone_id]
-                decoupler = getattr(self.static_overlay, config.decoupler_name)
-                decoupler.register_map.GPIO_DATA.CH1_DATA = config.couple_value  # 0
+                # Forza il valore per sicurezza
+                config = self.decoupler_configs[zone_id]
+                gpio_obj = self.decouplers[zone_id]
+                gpio_obj.write(config.couple_value)
     
     def reconfigure_pr_zone(self, zone_id: int, bitstream_path: str) -> bool:
         """
@@ -139,23 +143,31 @@ class DFXDecouplerManager:
             True se successo, False altrimenti
         """
         try:
+            logger.info(f"[DFX] === PARTIAL RECONFIGURATION SEQUENCE FOR PR {zone_id} ===")
+            
             # 1. Decouple la PR zone
+            logger.info(f"[DFX] Step 1: Decoupling PR region {zone_id}...")
             self.decouple_zone(zone_id)
             
             # 2. Carica il bitstream parziale
-            logger.info(f"[DFX] Loading partial bitstream: {bitstream_path}")
-            from pynq import Bitstream
+            logger.info(f"[DFX] Step 2: Loading bitstream: {bitstream_path}")
             
             partial_bitstream = Bitstream(bitstream_path, None, True)
+            
+            start_time = time.time()
             partial_bitstream.download()
+            end_time = time.time()
+            
+            logger.info(f"[DFX] Bitstream loaded in {end_time - start_time:.3f} seconds")
             
             # Pausa per assicurarsi che la riconfigurazione sia completa
             time.sleep(0.2)
             
             # 3. Re-couple la PR zone
+            logger.info(f"[DFX] Step 3: Recoupling PR region {zone_id}...")
             self.couple_zone(zone_id)
             
-            logger.info(f"[DFX] Partial reconfiguration of zone {zone_id} completed successfully")
+            logger.info(f"[DFX] === RECONFIGURATION COMPLETED SUCCESSFULLY ===")
             return True
             
         except Exception as e:
@@ -166,3 +178,22 @@ class DFXDecouplerManager:
             except:
                 pass
             return False
+    
+    def get_status(self) -> Dict:
+        """Ottieni stato di tutti i decouplers"""
+        status = {}
+        for zone_id, gpio_obj in self.decouplers.items():
+            config = self.decoupler_configs[zone_id]
+            try:
+                current_value = gpio_obj.read()
+                status[f'PR_{zone_id}'] = {
+                    'gpio_pin': config.gpio_pin,
+                    'current_value': current_value,
+                    'decoupled': self.is_decoupled(zone_id),
+                    'state': 'DECOUPLED' if current_value == config.decouple_value else 'COUPLED'
+                }
+            except Exception as e:
+                status[f'PR_{zone_id}'] = {
+                    'error': str(e)
+                }
+        return status

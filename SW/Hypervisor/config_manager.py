@@ -27,7 +27,7 @@ class PRZoneConfig:
     """Configurazione per una PR zone"""
     zone_id: int
     name: str
-    dfx_decoupler: str
+    gpio_pin: int
     address_ranges: List[tuple] = field(default_factory=list)
 
 class DynamicConfigManager:
@@ -78,11 +78,11 @@ class DynamicConfigManager:
                 zone = PRZoneConfig(
                     zone_id=zone_data['zone_id'],
                     name=zone_data['name'],
-                    dfx_decoupler=zone_data['dfx_decoupler'],
+                    gpio_pin=zone_data['gpio_pin'],
                     address_ranges=[tuple(r) for r in zone_data.get('address_ranges', [])]
                 )
                 self.pr_zones.append(zone)
-                logger.info(f"Added PR zone: {zone.name} with decoupler {zone.dfx_decoupler}")
+                logger.info(f"Added PR zone: {zone.name} with decoupler GPIO pin: {zone.gpio_pin}")
             
             # Se non ci sono PR zones definite, crea default
             if not self.pr_zones and self.num_pr_zones > 0:
@@ -132,7 +132,7 @@ class DynamicConfigManager:
             zone = PRZoneConfig(
                 zone_id=i,
                 name=f'PR_{i}',
-                dfx_decoupler=f'axi_gpio_{i}',
+                gpio_pin=f'axi_gpio_{i}',
                 address_ranges=[
                     (zone_base, 0x10000),  # 64KB
                     (zone_base + 0x10000, 0x10000)  # Altri 64KB
@@ -156,13 +156,13 @@ class DynamicConfigManager:
             PRZoneConfig(
                 zone_id=0,
                 name='PR_0',
-                dfx_decoupler='axi_gpio_0',
+                gpio_pin='axi_gpio_0',
                 address_ranges=[(0xA0000000, 0x10000), (0xA0010000, 0x10000)]
             ),
             PRZoneConfig(
                 zone_id=1,
                 name='PR_1', 
-                dfx_decoupler='axi_gpio_1',
+                gpio_pin='axi_gpio_1',
                 address_ranges=[(0xA0100000, 0x10000), (0xA0110000, 0x10000)]
             )
         ]
@@ -357,7 +357,7 @@ class DynamicConfigManager:
                 zone_dict = {
                     'zone_id': zone.zone_id,
                     'name': zone.name,
-                    'dfx_decoupler': zone.dfx_decoupler,
+                    'gpio_pin': zone.dfx_decoupler,
                     'address_ranges': list(zone.address_ranges)
                 }
                 global_config['pr_zones'].append(zone_dict)

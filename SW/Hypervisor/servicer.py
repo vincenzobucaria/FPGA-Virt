@@ -11,12 +11,12 @@ import pynq_service_pb2 as pb2
 import pynq_service_pb2_grpc as pb2_grpc
 
 from tenant_manager import TenantManager
-from mock_resource_manager import MockResourceManager as ResourceManager
+
 
 logger = logging.getLogger(__name__)
 
 class PYNQServicer(pb2_grpc.PYNQServiceServicer):
-    def __init__(self, tenant_manager: TenantManager, resource_manager: ResourceManager):
+    def __init__(self, tenant_manager: TenantManager, resource_manager):
         self.tenant_manager = tenant_manager
         self.resource_manager = resource_manager
         logger.info("PYNQServicer initialized")
@@ -59,10 +59,10 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
 # Sostituisci il metodo LoadOverlay nel servicer con questo:
 
     def LoadOverlay(self, request, context):
-        """Carica overlay"""
+        """Carica overlay e ritorna info incluso il device UIO"""
         tenant_id = self._get_tenant_id(context)
         logger.info(f"LoadOverlay request from {tenant_id}: {request.bitfile_path}")
-        print(request.bitfile_path)
+        
         try:
             overlay_id, ip_cores = self.resource_manager.load_overlay(
                 tenant_id, 
@@ -70,10 +70,13 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
             )
             logger.info(f"Overlay loaded successfully: {overlay_id}")
             
+            # Estrai metadata (zone_id e uio_device) dagli ip_cores
+            zone_id = ip_cores.pop('_zone_id', None)
+            uio_device = ip_cores.pop('_uio_device', None)
+            
             # Converti IP cores in formato proto
             proto_ip_cores = {}
             for name, ip_info in ip_cores.items():
-                # Crea IPCore base
                 proto_ip_core = pb2.IPCore(
                     name=ip_info['name'],
                     type=ip_info['type'],
@@ -82,10 +85,9 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
                     parameters=ip_info['parameters']
                 )
                 
-                # AGGIUNGI I REGISTRI SE PRESENTI - METODO CORRETTO!
+                # Aggiungi registri se presenti
                 if 'registers' in ip_info and ip_info['registers']:
                     for reg_name, reg_info in ip_info['registers'].items():
-                        # Crea il registro direttamente nel map
                         proto_ip_core.registers[reg_name].offset = reg_info['offset']
                         proto_ip_core.registers[reg_name].description = reg_info.get('description', '')
                     
@@ -93,16 +95,28 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
                 
                 proto_ip_cores[name] = proto_ip_core
             
-            return pb2.LoadOverlayResponse(
+            # Costruisci risposta con info UIO device
+            response = pb2.LoadOverlayResponse(
                 overlay_id=overlay_id,
                 ip_cores=proto_ip_cores
             )
+            
+            # NUOVO: Aggiungi info UIO device se disponibile
+            if uio_device:
+                response.uio_device = uio_device
+                logger.info(f"UIO device {uio_device} assigned to tenant {tenant_id} for overlay {overlay_id}")
+            
+            if zone_id is not None:
+                response.pr_zone_id = zone_id
+                logger.info(f"PR zone {zone_id} allocated for overlay {overlay_id}")
+            
+            return response
             
         except Exception as e:
             logger.error(f"LoadOverlay error: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
-            context.abort(grpc.StatusCode.INTERNAL, str(e)) 
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
     
     def GetOverlayInfo(self, request, context):
         """Ottieni info overlay"""
@@ -155,8 +169,9 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
     
     def MMIOWrite(self, request, context):
         """Scrivi su MMIO"""
+        t0 = time.perf_counter()
         tenant_id = self._get_tenant_id(context)
-        
+        t1 = time.perf_counter()
         try:
             self.resource_manager.mmio_write(
                 tenant_id,
@@ -164,7 +179,8 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
                 request.offset,
                 request.value
             )
-            
+            t2 = time.perf_counter()
+            logger.info(f"MMIO Write timing: auth={(t1-t0)*1000:.2f}ms, write={(t2-t1)*1000:.2f}ms")
             return pb2.Empty()
             
         except Exception as e:
@@ -183,14 +199,13 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
         logger.info(f"AllocateBuffer request from {tenant_id}: shape={shape}, dtype={dtype}")
         
         try:
-            # Alloca tramite resource manager
             buffer_info = self.resource_manager.allocate_buffer(
                 tenant_id,
                 shape,
                 dtype
             )
             
-            # Costruisci risposta
+            # Costruisci risposta con info char device
             response = pb2.AllocateBufferResponse(
                 handle=buffer_info['handle'],
                 physical_address=buffer_info['physical_address'],
@@ -199,10 +214,10 @@ class PYNQServicer(pb2_grpc.PYNQServiceServicer):
                 dtype=buffer_info['dtype']
             )
             
-            # Se shared memory disponibile, aggiungi info
-            if buffer_info['shm_name']:
-                print(f"Using shared memory: {buffer_info['shm_name']}")
-                response.shm_name = buffer_info['shm_name']
+            # Aggiungi info char device se disponibile
+            if buffer_info.get('vm_offset') is not None:
+                response.vm_offset = buffer_info['vm_offset']
+                response.char_device_path = buffer_info.get('char_device', '')
             
             return response
             
